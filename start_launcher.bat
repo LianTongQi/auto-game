@@ -1,10 +1,11 @@
 @echo off
+chcp 65001 >nul
 setlocal EnableExtensions
 
 set "PROJECT_DIR=%~dp0"
 set "ENVIRONMENT_FILE=%PROJECT_DIR%launcher_environment.bat"
-set "INSTALLER=%PROJECT_DIR%install_dependencies.bat"
 set "LAUNCHER_SCRIPT=%PROJECT_DIR%scheduler_launcher.py"
+set "RUNTIME_CHECK=%PROJECT_DIR%verify_runtime.py"
 
 if not exist "%ENVIRONMENT_FILE%" goto environment_file_missing
 call "%ENVIRONMENT_FILE%"
@@ -13,23 +14,19 @@ if errorlevel 1 goto environment_file_failed
 set "PYTHON_EXE=%TIMEDLAUNCHER_PYTHON_EXE%"
 
 if not exist "%LAUNCHER_SCRIPT%" goto script_missing
-if not exist "%INSTALLER%" goto installer_missing
+if not exist "%RUNTIME_CHECK%" goto runtime_check_missing
+if not exist "%PYTHON_EXE%" goto runtime_missing
+
+"%PYTHON_EXE%" -B "%RUNTIME_CHECK%" --quiet
+if errorlevel 1 goto runtime_invalid
 
 if /i "%~1"=="--check" (
     echo STARTER_CHECK_OK
     exit /b 0
 )
 
-call "%INSTALLER%" --check >nul 2>nul
-if errorlevel 1 (
-    echo TimedLauncher environment is missing or incomplete.
-    echo Starting first-run environment setup...
-    call "%INSTALLER%" --from-launcher
-    if errorlevel 1 goto environment_failed
-)
-
 cd /d "%PROJECT_DIR%"
-"%PYTHON_EXE%" "%LAUNCHER_SCRIPT%" %*
+"%PYTHON_EXE%" -B "%LAUNCHER_SCRIPT%" %*
 
 if errorlevel 1 goto launch_failed
 exit /b 0
@@ -46,15 +43,24 @@ echo %ENVIRONMENT_FILE%
 pause
 exit /b 1
 
-:installer_missing
-echo Dependency installer not found:
-echo %INSTALLER%
+:runtime_check_missing
+echo Runtime verifier not found:
+echo %RUNTIME_CHECK%
 pause
 exit /b 1
 
-:environment_failed
+:runtime_missing
 echo.
-echo TimedLauncher environment setup failed.
+echo Bundled Python runtime was not found:
+echo %PYTHON_EXE%
+echo Download and extract the complete Windows Release package.
+pause
+exit /b 1
+
+:runtime_invalid
+echo.
+echo Bundled Python runtime is incomplete or damaged.
+echo Download and extract the complete Windows Release package again.
 pause
 exit /b 1
 

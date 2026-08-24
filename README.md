@@ -1,6 +1,8 @@
 # TimedLauncher
 
-TimedLauncher 是一个 Windows 游戏日常任务串行启动器。它本身不重复实现游戏自动化功能，而是帮助用户按顺序调用已经安装并配置好的第三方工具，更轻松地完成多个游戏的日常任务。双击启动后，TimedLauncher 会请求管理员权限，依次启动工具、等待对应游戏或工具退出、执行必要的按键操作，并在全部流程结束后自动退出。
+TimedLauncher 是一个 Windows 10/11 64 位游戏日常任务串行启动器。它本身不重复实现游戏自动化功能，而是帮助用户按顺序调用已经安装并配置好的第三方工具，更轻松地完成多个游戏的日常任务。双击启动后，TimedLauncher 会请求管理员权限，依次启动工具、等待对应游戏或工具退出、执行必要的按键操作，并在全部流程结束后自动退出。
+
+完整 Release 已自带仅供本程序使用的 Python 和全部依赖。用户不需要安装 Python，不需要配置环境变量，也不会使用或修改电脑中已有的 Python 环境。
 
 ## 支持的程序与游戏
 
@@ -24,51 +26,43 @@ TimedLauncher/
 ├─ config/
 │  └─ tasks.json                 流程与本机程序路径
 ├─ logs/                         运行日志（Git 忽略）
-├─ runtime/                      锁文件和停止请求（Git 忽略）
+├─ runtime/
+│  ├─ python/                    Release 自带的私有 Python 与依赖
+│  ├─ launcher.lock              运行时锁文件（自动创建）
+│  └─ stop.request               安全停止请求（按需创建）
 ├─ scheduler_launcher.py         主程序
 ├─ setup_wizard.py               首次运行路径设置向导
-├─ launcher_environment.bat      统一定位项目内 Python 环境
+├─ verify_runtime.py             检查内置运行环境是否完整
+├─ launcher_environment.bat      定位内置 Python
 ├─ start_launcher.bat            显示控制台启动
 ├─ start_launcher_hidden.bat     隐藏控制台启动
 ├─ configure_launcher.bat        重新配置程序路径
 ├─ stop_launcher.bat             安全停止当前流程
-├─ install_dependencies.bat      安装 Python 依赖
-└─ requirements.txt              Python 依赖清单
+├─ runtime_manifest.json         Python 来源、版本与校验值
+├─ requirements.txt              固定依赖清单
+└─ build_release.ps1             维护者生成便携 Release 的脚本
 ```
 
-根目录批处理会根据自身位置定位项目，因此移动整个 `TimedLauncher` 文件夹后无需修改项目路径。Python 环境也位于项目内部：
+根目录批处理会根据自身位置定位项目，因此移动整个 `TimedLauncher` 文件夹后无需修改项目路径。完整 Release 始终直接调用：
 
 ```text
-TimedLauncher\.venv\Scripts\python.exe
+TimedLauncher\runtime\python\python.exe
 ```
 
-所有入口都通过 `launcher_environment.bat` 计算该路径，运行时不依赖手动激活虚拟环境。只有第一次创建 `.venv` 时，安装器才会自动查找电脑中已经安装的兼容 Python；管理员提权时主程序继续使用当前的 `sys.executable`，因此提权前后仍是同一个 `.venv`。
+启动器不会寻找系统 Python，也不会联网安装依赖。管理员提权前后继续使用同一个内置解释器。若运行环境缺失、版本不符或依赖损坏，启动器会明确停止并提示重新下载完整 Release，不会退回到电脑中的其他 Python。
 
-## 首次准备 Python
+## 下载与首次使用
 
-TimedLauncher 不包含 Python 本体，但不限定必须使用 Python 3.11。当前固定依赖要求 **64 位 Python 3.10 或更高版本**；只要该 Python 能创建 `.venv`、安装全部固定依赖并通过导入与版本验证，就可以使用。
+1. 打开 [TimedLauncher Releases](https://github.com/LianTongQi/auto-game/releases)，下载最新的 `TimedLauncher-v*-win64.zip`。不要下载 GitHub 自动生成的 `Source code` 压缩包，因为源码包不包含 Python 运行环境。
+2. 将 ZIP 完整解压到一个普通文件夹。不要只在压缩软件预览窗口中运行，也不要单独复制 `start_launcher.bat`。
+3. 双击 `start_launcher.bat`。程序会先验证内置 Python 和依赖，然后打开首次路径配置向导。
+4. 在 Windows 管理员权限提示中选择“是”，让后续自动化工具继承管理员权限。
 
-如果电脑已经安装兼容的 64 位 Python，可以直接双击 `start_launcher.bat`。如果尚未安装：
-
-1. 打开 [Python 官方 Windows 下载页](https://www.python.org/downloads/windows/)，选择仍受支持的 64 位 Python。
-2. 运行安装程序，在第一个页面勾选 **Add python.exe to PATH**。
-3. 完成安装后重新双击 `start_launcher.bat`。
-
-也可以在命令提示符中执行以下命令确认 Python Launcher 能找到 Python：
-
-```bat
-py -3 --version
-```
-
-安装器会优先选择已知兼容版本，并允许通过 `TIMEDLAUNCHER_BOOTSTRAP_PYTHON` 指定其他兼容解释器。系统 Python 只用于创建项目 `.venv`；后续依赖都会安装在项目内部，不会写入系统 Python 环境。如果依赖安装或版本验证失败，启动器会明确报错，不会继续运行。
+发布包目前固定使用 Python 3.14.7 64 位。Python 文件只保存在 TimedLauncher 文件夹内，不会安装到 Windows，不会加入 `PATH`，删除整个 TimedLauncher 文件夹即可一并移除。
 
 ## 使用方法
 
-直接双击 `start_launcher.bat`：如果项目内尚无 `.venv`，启动器会自动寻找兼容 Python、创建环境、安装并验证依赖，然后继续打开中文路径向导。无需先执行 `conda activate`，通常也无需手动选择 Python 环境。
-
-`install_dependencies.bat` 仍可单独运行，用于提前准备或修复环境。安装器只在项目自己的 `.venv` 中安装依赖；任何创建、安装或导入验证失败都会返回错误，不会再误报“依赖安装完成”。完成环境准备后，如果尚未完成首次设置，程序会自动打开中文路径向导。请从第一行开始，严格按照 BetterGI、March7th Assistant、OK-WW、OneDragon、MaaEnd 的顺序配置；每个游戏主程序路径必须紧跟在对应自动化工具之后。
-
-依赖清单固定为本项目已验证的版本，避免不同用户在不同日期安装到行为不一致的新版本。如果 `.venv` 缺失或依赖导入失败，正常启动、隐藏启动和重新配置三个入口都会自动调用安装器修复。
+首次启动会自动打开中文路径向导。请从第一行开始，严格按照 BetterGI、March7th Assistant、OK-WW、OneDragon、MaaEnd 的顺序配置；每个游戏主程序路径必须紧跟在对应自动化工具之后。
 
 路径可以留空：未填写完整路径的自动化阶段，以及依附于它的等待、按键和关闭动作，会在正式运行时整体跳过，随后直接进入下一个程序。向导只检查已填写的文件，并把原配置备份至 `config/backups`。它只更新路径和启动程序的工作目录，不会更改 `args` 中已有的启动参数。以后需要修改安装位置时，可以双击 `configure_launcher.bat` 重新打开向导。
 
@@ -80,7 +74,6 @@ py -3 --version
 - 双击 `start_launcher_hidden.bat` 隐藏主控制台启动。
 - 双击 `stop_launcher.bat` 请求安全停止。
 - 双击 `configure_launcher.bat` 重新配置程序路径。
-- 双击 `install_dependencies.bat` 手动检查并修复项目环境。
 - 在 UAC 提示中选择“是”，确保自动化工具继承管理员权限。
 
 从指定程序开始运行：
@@ -129,6 +122,26 @@ start_launcher.bat --start-at March7th
 1. 记录明确的错误原因；
 2. 尝试关闭本次流程启动的程序；
 3. 返回非零退出状态，不再把失败误报为“全部完成”。
+
+## 从源码构建 Release
+
+Git 仓库只保存源代码、固定依赖清单和运行环境校验信息，不直接提交体积较大的 Python 文件。普通用户应下载 Releases 页面中的完整 ZIP，而不是直接下载源码。
+
+维护者可以在 Windows PowerShell 中运行：
+
+```powershell
+.\build_release.ps1 -Version 1.0.0
+```
+
+构建脚本会完成以下工作：
+
+1. 检查 `config/tasks.json` 中不存在本机程序路径；
+2. 从 Python 官方地址下载固定的 64 位 Python 归档并校验 SHA-256；
+3. 在临时发布目录中安装 `requirements.txt` 的固定依赖；
+4. 验证 Python、Tk 图形界面、依赖版本、首次向导映射和三个启动入口；
+5. 生成 `dist/TimedLauncher-v*-win64.zip` 和 `dist/SHA256SUMS.txt`。
+
+下载来源和固定校验值记录在 [runtime_manifest.json](runtime_manifest.json)。发布包中的 Python 保留 Python Software Foundation 提供的许可证文件，各依赖的许可证信息随对应的 `*.dist-info` 目录一同打包。
 
 ## Git
 

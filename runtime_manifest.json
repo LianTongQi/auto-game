@@ -1,0 +1,9 @@
+{
+  "python": {
+    "version": "3.14.7",
+    "architecture": "amd64",
+    "url": "https://www.python.org/ftp/python/3.14.7/python-3.14.7-amd64.zip",
+    "sha256": "ac1a727a71738e11de80b76e975f9b8a258aea6412bfc31696b929d59c6aafd0"
+  },
+  "requirements_sha256": "a711d2575f7b32611fda4d21bee95d0febcd0692dc4383755e9d640540ae28b6"
+}

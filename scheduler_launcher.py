@@ -202,7 +202,7 @@ def wait_interruptibly(seconds):
 def find_processes_by_path(executable_path):
     """使用 psutil 按完整可执行文件路径查找进程。"""
     if psutil is None:
-        raise RuntimeError("缺少依赖 psutil，请先运行 install_dependencies.bat")
+        raise RuntimeError("内置运行环境缺少 psutil，请重新下载并完整解压 Release 包")
 
     target_path = os.path.normcase(
         os.path.realpath(os.path.abspath(str(executable_path)))
