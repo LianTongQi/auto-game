@@ -1,0 +1,141 @@
+[
+  {
+    "name": "顺序启动流程",
+    "run_on_start": true,
+    "enabled": true,
+    "steps": [
+      {
+        "type": "launch",
+        "name": "程序A",
+        "path": "",
+        "setup_key": "bettergi",
+        "args": [],
+        "working_dir": "",
+        "requires_setup_keys": ["bettergi", "genshin"],
+        "save_as": "A"
+      },
+      {
+        "type": "wait",
+        "duration": "00:00:10",
+        "requires": ["A"]
+      },
+      {
+        "type": "key",
+        "target": "A",
+        "mode": "press",
+        "keys": ["f10"],
+        "repeat": 1,
+        "interval": 0.2,
+        "window_timeout": 30
+      },
+      {
+        "type": "wait_process_exit",
+        "path": "",
+        "setup_key": "genshin",
+        "requires": ["A"],
+        "start_timeout": "00:05:00",
+        "exit_timeout": "00:30:00",
+        "after_exit": "00:00:10"
+      },
+      {
+        "type": "close",
+        "target": "A",
+        "force_close": true
+      },
+      {
+        "type": "launch",
+        "name": "March7th Assistant",
+        "path": "",
+        "setup_key": "march7th",
+        "args": [],
+        "working_dir": "",
+        "show_console": true,
+        "requires_setup_keys": ["march7th", "starrail"],
+        "save_as": "March7th"
+      },
+      {
+        "type": "wait_process_exit",
+        "path": "",
+        "setup_key": "starrail",
+        "requires": ["March7th"],
+        "start_timeout": "00:05:00",
+        "exit_timeout": "00:30:00",
+        "after_exit": "00:00:05"
+      },
+      {
+        "type": "key",
+        "target": "March7th",
+        "mode": "press",
+        "keys": ["enter"],
+        "repeat": 1,
+        "interval": 0.2,
+        "window_timeout": 30
+      },
+      {
+        "type": "wait",
+        "duration": "00:00:05",
+        "requires": ["March7th"]
+      },
+      {
+        "type": "launch",
+        "name": "ok-ww",
+        "path": "",
+        "setup_key": "okww",
+        "args": ["-t", "1", "-e"],
+        "working_dir": "",
+        "requires_setup_keys": ["okww", "wuthering_client"],
+        "save_as": "OKWW"
+      },
+      {
+        "type": "wait_process_exit",
+        "path": "",
+        "setup_key": "wuthering_client",
+        "requires": ["OKWW"],
+        "start_timeout": "00:10:00",
+        "exit_timeout": "00:30:00",
+        "after_exit": "00:00:10"
+      },
+      {
+        "type": "launch",
+        "name": "程序B",
+        "path": "",
+        "setup_key": "onedragon",
+        "args": ["-o", "-c"],
+        "working_dir": "",
+        "save_as": "B"
+      },
+      {
+        "type": "wait_process_exit",
+        "path": "",
+        "setup_key": "onedragon",
+        "requires": ["B"],
+        "start_timeout": "00:01:00",
+        "exit_timeout": "00:30:00",
+        "after_exit": "00:00:10"
+      },
+      {
+        "type": "launch",
+        "name": "程序C",
+        "path": "",
+        "setup_key": "maaend",
+        "args": [],
+        "working_dir": "",
+        "save_as": "C"
+      },
+      {
+        "type": "wait",
+        "duration": "00:00:10",
+        "requires": ["C"]
+      },
+      {
+        "type": "key",
+        "target": "C",
+        "mode": "press",
+        "keys": ["f10"],
+        "repeat": 1,
+        "interval": 0.2,
+        "window_timeout": 30
+      }
+    ]
+  }
+]

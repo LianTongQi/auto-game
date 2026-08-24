@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Runtime output
+logs/*
+!logs/.gitkeep
+runtime/*
+!runtime/.gitkeep
+launcher.log*
+launcher.lock
+stop.request
+config/setup_state.json
+config/backups/
+
+# Local tooling
+.agents/
+.codex/
+.tools/
+.idea/
+.vscode/
+
+# Windows
+Thumbs.db
+Desktop.ini
+*.lnk
