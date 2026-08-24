@@ -43,15 +43,17 @@ call :verify_environment
 exit /b %errorlevel%
 
 :create_environment
-call :find_python_311
+call :find_compatible_python
 if errorlevel 1 exit /b 1
 
 echo.
-echo Creating an isolated Python 3.11 environment:
+echo Creating an isolated TimedLauncher environment:
 echo %VENV_DIR%
 if /i "%BASE_PYTHON_KIND%"=="launcher" (
-    py.exe -3.11 -m venv "%VENV_DIR%"
+    echo Using Python launcher selector %BASE_PYTHON_SELECTOR%
+    py.exe %BASE_PYTHON_SELECTOR% -m venv "%VENV_DIR%"
 ) else (
+    echo Using %BASE_PYTHON_EXE%
     "%BASE_PYTHON_EXE%" -m venv "%VENV_DIR%"
 )
 if errorlevel 1 exit /b 1
@@ -61,13 +63,14 @@ if not exist "%PYTHON_EXE%" exit /b 1
 if errorlevel 1 exit /b 1
 exit /b 0
 
-:find_python_311
+:find_compatible_python
 set "BASE_PYTHON_KIND="
 set "BASE_PYTHON_EXE="
+set "BASE_PYTHON_SELECTOR="
 
 if defined TIMEDLAUNCHER_BOOTSTRAP_PYTHON (
     if exist "%TIMEDLAUNCHER_BOOTSTRAP_PYTHON%" (
-        "%TIMEDLAUNCHER_BOOTSTRAP_PYTHON%" -B -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) and sys.maxsize > 2**32 else 1)" >nul 2>nul
+        "%TIMEDLAUNCHER_BOOTSTRAP_PYTHON%" -B -c "import sys, venv; raise SystemExit(0 if sys.version_info >= (3, 10) and sys.maxsize > 2**32 else 1)" >nul 2>nul
         if not errorlevel 1 (
             set "BASE_PYTHON_KIND=executable"
             set "BASE_PYTHON_EXE=%TIMEDLAUNCHER_BOOTSTRAP_PYTHON%"
@@ -78,15 +81,26 @@ if defined TIMEDLAUNCHER_BOOTSTRAP_PYTHON (
 
 where py.exe >nul 2>nul
 if not errorlevel 1 (
-    py.exe -3.11 -B -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) and sys.maxsize > 2**32 else 1)" >nul 2>nul
+    for %%V in (3.14 3.13 3.12 3.11 3.10) do (
+        py.exe -%%V -B -c "import sys, venv; raise SystemExit(0 if sys.version_info >= (3, 10) and sys.maxsize > 2**32 else 1)" >nul 2>nul
+        if not errorlevel 1 (
+            set "BASE_PYTHON_KIND=launcher"
+            set "BASE_PYTHON_SELECTOR=-%%V"
+            exit /b 0
+        )
+    )
+
+    rem Future Python versions may also work when all pinned dependencies support them.
+    py.exe -3 -B -c "import sys, venv; raise SystemExit(0 if sys.version_info >= (3, 10) and sys.maxsize > 2**32 else 1)" >nul 2>nul
     if not errorlevel 1 (
         set "BASE_PYTHON_KIND=launcher"
+        set "BASE_PYTHON_SELECTOR=-3"
         exit /b 0
     )
 )
 
 for /f "delims=" %%P in ('where python.exe 2^>nul') do (
-    "%%P" -B -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) and sys.maxsize > 2**32 else 1)" >nul 2>nul
+    "%%P" -B -c "import sys, venv; raise SystemExit(0 if sys.version_info >= (3, 10) and sys.maxsize > 2**32 else 1)" >nul 2>nul
     if not errorlevel 1 (
         set "BASE_PYTHON_KIND=executable"
         set "BASE_PYTHON_EXE=%%P"
@@ -95,13 +109,14 @@ for /f "delims=" %%P in ('where python.exe 2^>nul') do (
 )
 
 echo.
-echo Python 3.11 64-bit was not found.
-echo Install it from https://www.python.org/downloads/release/python-3119/
+echo No compatible 64-bit Python was found.
+echo Current pinned dependencies require Python 3.10 or newer.
+echo Install a supported version from https://www.python.org/downloads/windows/
 echo During setup, enable "Add python.exe to PATH", then run this file again.
 exit /b 1
 
 :verify_environment
-"%PYTHON_EXE%" -B -c "import sys, psutil, pyautogui, pygetwindow; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)" >nul 2>nul
+"%PYTHON_EXE%" -B -c "import sys, psutil, pyautogui, pygetwindow; from importlib.metadata import version; expected={'MouseInfo':'0.1.3','Pillow':'12.3.0','psutil':'7.2.2','PyAutoGUI':'0.9.54','PyGetWindow':'0.0.9','PyMsgBox':'2.0.1','pyperclip':'1.11.0','PyRect':'0.2.0','PyScreeze':'1.0.1','pytweening':'1.2.0'}; raise SystemExit(0 if sys.version_info >= (3, 10) and sys.maxsize > 2**32 and all(version(name) == wanted for name, wanted in expected.items()) else 1)" >nul 2>nul
 exit /b %errorlevel%
 
 :environment_file_missing
@@ -122,7 +137,7 @@ goto failed
 :environment_create_failed
 echo.
 echo Unable to create the project environment.
-echo Check that Python 3.11 64-bit is installed and this folder is writable.
+echo Check that a compatible 64-bit Python is installed and this folder is writable.
 goto failed
 
 :install_failed

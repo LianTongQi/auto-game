@@ -42,26 +42,29 @@ TimedLauncher/
 TimedLauncher\.venv\Scripts\python.exe
 ```
 
-所有入口都通过 `launcher_environment.bat` 计算该路径，不读取系统默认 Python，也不依赖手动激活虚拟环境。管理员提权时主程序继续使用当前的 `sys.executable`，因此提权前后仍是同一个 `.venv`。
+所有入口都通过 `launcher_environment.bat` 计算该路径，运行时不依赖手动激活虚拟环境。只有第一次创建 `.venv` 时，安装器才会自动查找电脑中已经安装的兼容 Python；管理员提权时主程序继续使用当前的 `sys.executable`，因此提权前后仍是同一个 `.venv`。
 
-## 首次安装 Python（必须）
+## 首次准备 Python
 
-TimedLauncher 不包含 Python 本体。第一次使用前，电脑必须安装 **64 位 Python 3.11**；已经安装的用户无需重复安装。
+TimedLauncher 不包含 Python 本体，但不限定必须使用 Python 3.11。当前固定依赖要求 **64 位 Python 3.10 或更高版本**；只要该 Python 能创建 `.venv`、安装全部固定依赖并通过导入与版本验证，就可以使用。
 
-1. 打开 [Python 3.11.9 官方发布页](https://www.python.org/downloads/release/python-3119/)，在页面的 Windows 文件中下载 **Windows installer (64-bit)**；也可以使用[官方安装程序直链](https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe)。
+如果电脑已经安装兼容的 64 位 Python，可以直接双击 `start_launcher.bat`。如果尚未安装：
+
+1. 打开 [Python 官方 Windows 下载页](https://www.python.org/downloads/windows/)，选择仍受支持的 64 位 Python。
 2. 运行安装程序，在第一个页面勾选 **Add python.exe to PATH**。
-3. 选择 **Install Now** 并等待安装完成。
-4. 安装后重新打开命令提示符，执行以下命令：
+3. 完成安装后重新双击 `start_launcher.bat`。
+
+也可以在命令提示符中执行以下命令确认 Python Launcher 能找到 Python：
 
 ```bat
-py -3.11 --version
+py -3 --version
 ```
 
-如果显示 `Python 3.11.x`，说明 Python 已正确安装。项目只使用它创建 `.venv`；后续依赖都会安装在项目内部，不会写入系统 Python 环境。
+安装器会优先选择已知兼容版本，并允许通过 `TIMEDLAUNCHER_BOOTSTRAP_PYTHON` 指定其他兼容解释器。系统 Python 只用于创建项目 `.venv`；后续依赖都会安装在项目内部，不会写入系统 Python 环境。如果依赖安装或版本验证失败，启动器会明确报错，不会继续运行。
 
 ## 使用方法
 
-完成上面的 Python 安装后，直接双击 `start_launcher.bat`：如果项目内尚无 `.venv`，启动器会自动创建环境、安装并验证依赖，然后继续打开中文路径向导。无需先执行 `conda activate`，也无需手动选择 Python 环境。
+直接双击 `start_launcher.bat`：如果项目内尚无 `.venv`，启动器会自动寻找兼容 Python、创建环境、安装并验证依赖，然后继续打开中文路径向导。无需先执行 `conda activate`，通常也无需手动选择 Python 环境。
 
 `install_dependencies.bat` 仍可单独运行，用于提前准备或修复环境。安装器只在项目自己的 `.venv` 中安装依赖；任何创建、安装或导入验证失败都会返回错误，不会再误报“依赖安装完成”。完成环境准备后，如果尚未完成首次设置，程序会自动打开中文路径向导。请从第一行开始，严格按照 BetterGI、March7th Assistant、OK-WW、OneDragon、MaaEnd 的顺序配置；每个游戏主程序路径必须紧跟在对应自动化工具之后。
 
