@@ -93,7 +93,15 @@
         "requires": ["OKWW"],
         "start_timeout": "00:10:00",
         "exit_timeout": "00:30:00",
-        "after_exit": "00:00:10"
+        "after_exit": "00:00:10",
+        "restart_on_log": {
+          "target": "OKWW",
+          "relative_log_path": "data\\apps\\ok-ww\\working\\logs\\ok-script.log",
+          "marker": "游戏更新成功, 游戏即将重启",
+          "max_restarts": 1,
+          "restart_timeout": "00:05:00",
+          "restart_stable": "00:00:05"
+        }
       },
       {
         "type": "launch",

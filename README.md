@@ -91,9 +91,10 @@ start_launcher.bat --start-at March7th
 2. 等待原神启动和退出，稳定关闭 10 秒后关闭 BetterGI。
 3. 启动 March7th Assistant，等待星穹铁道退出 5 秒后向其控制台发送回车。
 4. 等待 5 秒，启动 `ok-ww.exe -t 1 -e`。
-5. 等待鸣潮客户端退出 10 秒后启动 OneDragon。
-6. 使用参数 `-o -c` 启动 OneDragon，退出 10 秒后启动 MaaEnd。
-7. 等待 10 秒，向 MaaEnd 发送 `F10`，随后 TimedLauncher 退出。
+5. 如果 OK-WW 报告鸣潮更新完成并自动退出，等待鸣潮以新进程稳定重启 5 秒，再按原参数自动重启一次 OK-WW。
+6. 等待鸣潮客户端最终退出 10 秒后启动 OneDragon。
+7. 使用参数 `-o -c` 启动 OneDragon，退出 10 秒后启动 MaaEnd。
+8. 等待 10 秒，向 MaaEnd 发送 `F10`，随后 TimedLauncher 退出。
 
 所有受监测程序的最长运行等待时间为 30 分钟。鸣潮客户端的启动检测时间为 10 分钟，其余启动检测时间见 [config/tasks.json](config/tasks.json)。
 
@@ -113,6 +114,8 @@ start_launcher.bat --start-at March7th
 - `exit_timeout`：检测到目标后，等待其退出的最长时间。
 - `after_exit`：目标持续关闭多久后进入下一步。
 
+OK-WW 的等待步骤还配置了 `restart_on_log`。它只读取本次等待开始后新增的 `ok-script.log` 内容；检测到“游戏更新成功, 游戏即将重启”后，最多自动重启 OK-WW 一次。若鸣潮未在 5 分钟内完成进程重启，流程会记录错误并停止，避免无限循环。
+
 ## 日志与故障状态
 
 运行日志位于 [logs/launcher.log](logs/launcher.log)，达到 5 MB 后自动轮转，最多保留 3 份历史日志。
@@ -130,7 +133,7 @@ Git 仓库只保存源代码、固定依赖清单和运行环境校验信息，�
 维护者可以在 Windows PowerShell 中运行：
 
 ```powershell
-.\build_release.ps1 -Version 1.0.0
+.\build_release.ps1 -Version 1.0.1
 ```
 
 构建脚本会完成以下工作：
@@ -138,7 +141,7 @@ Git 仓库只保存源代码、固定依赖清单和运行环境校验信息，�
 1. 检查 `config/tasks.json` 中不存在本机程序路径；
 2. 从 Python 官方地址下载固定的 64 位 Python 归档并校验 SHA-256；
 3. 在临时发布目录中安装 `requirements.txt` 的固定依赖；
-4. 验证 Python、Tk 图形界面、依赖版本、首次向导映射和三个启动入口；
+4. 验证 Python、Tk 图形界面、依赖版本、自动重启逻辑、首次向导映射和三个启动入口；
 5. 生成 `dist/TimedLauncher-v*-win64.zip` 和 `dist/SHA256SUMS.txt`。
 
 下载来源和固定校验值记录在 [runtime_manifest.json](runtime_manifest.json)。发布包中的 Python 保留 Python Software Foundation 提供的许可证文件，各依赖的许可证信息随对应的 `*.dist-info` 目录一同打包。

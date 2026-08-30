@@ -229,11 +229,79 @@ def find_processes_by_path(executable_path):
     return matches
 
 
+class AppendedLogMarkerWatcher:
+    """只检查创建监视器后追加到日志中的指定标记。"""
+
+    def __init__(self, log_path, marker):
+        self.log_path = Path(log_path)
+        self.marker = str(marker).encode("utf-8")
+        if not self.marker:
+            raise ValueError("日志标记不能为空")
+
+        try:
+            log_stat = self.log_path.stat()
+            self.offset = log_stat.st_size
+            self.file_identity = (log_stat.st_dev, log_stat.st_ino)
+        except FileNotFoundError:
+            self.offset = 0
+            self.file_identity = None
+        self.carry = b""
+
+    def poll(self):
+        try:
+            log_stat = self.log_path.stat()
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            log_warning(f"暂时无法读取更新日志：{self.log_path}，原因：{error}")
+            return False
+
+        current_identity = (log_stat.st_dev, log_stat.st_ino)
+        current_size = log_stat.st_size
+        if self.file_identity is not None and current_identity != self.file_identity:
+            self.offset = 0
+            self.carry = b""
+        elif current_size < self.offset:
+            self.offset = 0
+            self.carry = b""
+        self.file_identity = current_identity
+
+        if current_size == self.offset:
+            return False
+
+        try:
+            with self.log_path.open("rb") as log_file:
+                log_file.seek(self.offset)
+                new_content = log_file.read()
+                self.offset = log_file.tell()
+        except OSError as error:
+            log_warning(f"暂时无法读取更新日志：{self.log_path}，原因：{error}")
+            return False
+
+        combined = self.carry + new_content
+        marker_found = self.marker in combined
+        carry_size = max(0, len(self.marker) - 1)
+        self.carry = combined[-carry_size:] if carry_size else b""
+        return marker_found
+
+    def reset_to_end(self):
+        try:
+            log_stat = self.log_path.stat()
+            self.offset = log_stat.st_size
+            self.file_identity = (log_stat.st_dev, log_stat.st_ino)
+        except FileNotFoundError:
+            self.offset = 0
+            self.file_identity = None
+        self.carry = b""
+
+
 def wait_for_process_exit(
     executable_path,
     start_timeout,
     exit_timeout,
-    stable_seconds
+    stable_seconds,
+    restart_policy=None,
+    restart_callback=None
 ):
     """确认目标进程已启动，再等待其退出并持续保持关闭状态。"""
     if not os.path.isfile(executable_path):
@@ -248,6 +316,7 @@ def wait_for_process_exit(
         if matches:
             pids = [item["pid"] for item in matches]
             log_info(f"已检测到目标程序启动：PID={pids}")
+            active_cycle_pids = set(pids)
             break
 
         if time.monotonic() >= start_deadline:
@@ -258,10 +327,97 @@ def wait_for_process_exit(
     absent_since = None
     log_info(f"等待程序退出：{executable_path}，超时={exit_timeout}s")
 
+    marker_watcher = None
+    max_restarts = 0
+    restart_timeout = 0
+    restart_stable = 0
+    restart_count = 0
+    restart_pending = False
+    restart_deadline = None
+    restart_origin_pids = set()
+    saw_restart_absence = False
+    replacement_pids = None
+    replacement_since = None
+
+    if restart_policy:
+        if restart_callback is None:
+            raise RuntimeError("配置了更新重启规则，但缺少重启回调")
+        marker_watcher = AppendedLogMarkerWatcher(
+            restart_policy["log_path"],
+            restart_policy["marker"]
+        )
+        max_restarts = int(restart_policy.get("max_restarts", 1))
+        restart_timeout = float(restart_policy.get("restart_timeout", 300))
+        restart_stable = float(restart_policy.get("restart_stable", 5))
+        if max_restarts < 1:
+            raise RuntimeError("更新重启次数必须至少为 1")
+        if restart_timeout <= 0 or restart_stable < 0:
+            raise RuntimeError("更新重启等待时间配置无效")
+        log_info(
+            f"已启用更新后自动重启：日志={marker_watcher.log_path}，"
+            f"最多重启={max_restarts} 次"
+        )
+
     while True:
         check_stop_requested()
         matches = find_processes_by_path(executable_path)
         now = time.monotonic()
+        current_pids = {item["pid"] for item in matches}
+
+        if marker_watcher and marker_watcher.poll():
+            if restart_pending:
+                log_warning("更新重启仍在处理中，忽略重复的更新日志标记")
+            elif restart_count >= max_restarts:
+                raise RuntimeError(
+                    f"检测到再次更新重启，但已达到自动重启上限 {max_restarts} 次"
+                )
+            else:
+                restart_pending = True
+                restart_deadline = now + restart_timeout
+                restart_origin_pids = set(active_cycle_pids)
+                saw_restart_absence = False
+                replacement_pids = None
+                replacement_since = None
+                absent_since = None
+                log_warning(
+                    "检测到鸣潮更新完成并即将重启，等待新的游戏进程稳定后重新启动 OK-WW"
+                )
+
+        if restart_pending:
+            if not current_pids:
+                saw_restart_absence = True
+                replacement_pids = None
+                replacement_since = None
+            elif saw_restart_absence or current_pids != restart_origin_pids:
+                if current_pids != replacement_pids:
+                    replacement_pids = set(current_pids)
+                    replacement_since = now
+                    log_info(
+                        f"检测到更新后的鸣潮进程：PID={sorted(current_pids)}，"
+                        f"确认稳定 {restart_stable}s"
+                    )
+                elif now - replacement_since >= restart_stable:
+                    restarted_process = restart_callback()
+                    if restarted_process is None:
+                        raise RuntimeError("更新后重新启动 OK-WW 失败")
+                    restart_count += 1
+                    restart_pending = False
+                    active_cycle_pids = set(current_pids)
+                    absent_since = None
+                    exit_deadline = now + exit_timeout
+                    marker_watcher.reset_to_end()
+                    log_info(
+                        f"更新后已重新启动 OK-WW（第 {restart_count}/{max_restarts} 次），"
+                        "继续等待鸣潮最终退出"
+                    )
+
+            if restart_pending and now >= restart_deadline:
+                raise RuntimeError(
+                    f"鸣潮更新后未在 {restart_timeout}s 内完成游戏进程重启"
+                )
+
+            wait_interruptibly(1)
+            continue
 
         if matches:
             absent_since = None
@@ -698,6 +854,7 @@ def run_workflow(task, start_at=None):
     log_info(f"开始执行流程：{task.get('name')}")
 
     process_map = {}
+    launch_spec_map = {}
     skipped_processes = set()
 
     all_steps = task.get("steps", [])
@@ -793,6 +950,7 @@ def run_workflow(task, start_at=None):
                     raise RuntimeError(f"启动失败：{step.get('name')}")
 
                 process_map[save_as] = process
+                launch_spec_map[save_as] = launch_task
                 log_info(f"已记录进程：{save_as}，PID={process.pid}")
 
             elif step_type == "wait":
@@ -818,11 +976,74 @@ def run_workflow(task, start_at=None):
                     step.get("after_exit", "00:00:10")
                 ).total_seconds()
 
+                restart_policy = None
+                restart_callback = None
+                restart_config = step.get("restart_on_log")
+                if restart_config is not None:
+                    if not isinstance(restart_config, dict):
+                        raise RuntimeError("restart_on_log 必须是 JSON 对象")
+
+                    restart_target = restart_config.get("target")
+                    if not restart_target or restart_target not in launch_spec_map:
+                        raise RuntimeError(
+                            f"更新重启目标不存在或尚未启动：{restart_target}"
+                        )
+
+                    relative_log_path = str(
+                        restart_config.get("relative_log_path") or ""
+                    ).strip()
+                    marker = str(restart_config.get("marker") or "").strip()
+                    if not relative_log_path or not marker:
+                        raise RuntimeError(
+                            "restart_on_log 缺少 relative_log_path 或 marker"
+                        )
+                    if Path(relative_log_path).is_absolute():
+                        raise RuntimeError("更新日志必须使用相对于目标程序的路径")
+
+                    restart_launch_task = launch_spec_map[restart_target]
+                    restart_working_dir = restart_launch_task.get("working_dir")
+                    if not restart_working_dir:
+                        restart_working_dir = str(
+                            Path(restart_launch_task["path"]).parent
+                        )
+                    restart_log_path = (
+                        Path(restart_working_dir) / relative_log_path
+                    ).resolve()
+
+                    restart_policy = {
+                        "log_path": restart_log_path,
+                        "marker": marker,
+                        "max_restarts": int(
+                            restart_config.get("max_restarts", 1)
+                        ),
+                        "restart_timeout": parse_duration(
+                            restart_config.get("restart_timeout", "00:05:00")
+                        ).total_seconds(),
+                        "restart_stable": parse_duration(
+                            restart_config.get("restart_stable", "00:00:05")
+                        ).total_seconds()
+                    }
+
+                    def restart_callback(
+                        target=restart_target,
+                        launch_task=restart_launch_task
+                    ):
+                        log_info(f"按原参数重新启动更新后的程序：{target}")
+                        restarted = launch_program(launch_task)
+                        if restarted is not None:
+                            process_map[target] = restarted
+                            log_info(
+                                f"已更新进程记录：{target}，PID={restarted.pid}"
+                            )
+                        return restarted
+
                 wait_for_process_exit(
                     executable_path=executable_path,
                     start_timeout=start_timeout,
                     exit_timeout=exit_timeout,
-                    stable_seconds=stable_seconds
+                    stable_seconds=stable_seconds,
+                    restart_policy=restart_policy,
+                    restart_callback=restart_callback
                 )
 
             elif step_type == "key":

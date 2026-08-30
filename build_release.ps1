@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '1.0.0'
+    [string]$Version = '1.0.1'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -147,6 +147,10 @@ if ($LASTEXITCODE -ne 0) {
 & $pythonExe -B (Join-Path $PackageDir 'setup_wizard.py') --validate-mapping
 if ($LASTEXITCODE -ne 0) {
     throw 'Setup wizard mapping validation failed'
+}
+& $pythonExe -B -m unittest discover -s (Join-Path $ProjectDir 'tests') -p 'test_*.py'
+if ($LASTEXITCODE -ne 0) {
+    throw 'Unit tests failed'
 }
 
 foreach ($entry in @('start_launcher.bat', 'start_launcher_hidden.bat', 'configure_launcher.bat')) {
