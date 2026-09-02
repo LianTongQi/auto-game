@@ -16,7 +16,7 @@ CONFIG_DIR = BASE_DIR / "config"
 CONFIG_FILE = CONFIG_DIR / "tasks.json"
 STATE_FILE = CONFIG_DIR / "setup_state.json"
 BACKUP_DIR = CONFIG_DIR / "backups"
-SETUP_VERSION = 1
+SETUP_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -66,8 +66,15 @@ PROGRAM_FIELDS = (
         "https://github.com/OneDragon-Anything/ZenlessZoneZero-OneDragon/releases",
     ),
     ProgramField(
+        "maa",
+        "5. MAA",
+        "MAA.exe",
+        "至少等待 1 分钟，最长运行 15 分钟",
+        "https://github.com/MaaAssistantArknights/MaaAssistantArknights/releases",
+    ),
+    ProgramField(
         "maaend",
-        "5. MaaEnd",
+        "6. MaaEnd",
         "MaaEnd.exe",
         "启动后等待 10 秒并按 F10",
         "https://github.com/MaaEnd/MaaEnd/releases",

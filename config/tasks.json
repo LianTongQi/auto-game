@@ -123,6 +123,33 @@
       },
       {
         "type": "launch",
+        "name": "MAA",
+        "path": "",
+        "setup_key": "maa",
+        "args": [],
+        "working_dir": "",
+        "save_as": "MAA"
+      },
+      {
+        "type": "wait_process_exit",
+        "path": "",
+        "setup_key": "maa",
+        "requires": ["MAA"],
+        "start_timeout": "00:01:00",
+        "minimum_wait": "00:01:00",
+        "exit_timeout": "00:15:00",
+        "after_exit": "00:00:00",
+        "timeout_is_error": false
+      },
+      {
+        "type": "close",
+        "target": "MAA",
+        "path": "",
+        "setup_key": "maa",
+        "force_close": true
+      },
+      {
+        "type": "launch",
         "name": "程序C",
         "path": "",
         "setup_key": "maaend",

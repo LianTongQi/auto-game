@@ -8,9 +8,10 @@ import signal
 import subprocess
 import sys
 import time
+import traceback
 from ctypes import wintypes
 from pathlib import Path
-from datetime import timedelta
+from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 
 try:
@@ -31,9 +32,12 @@ for directory in (CONFIG_DIR, LOG_DIR, RUNTIME_DIR):
 CONFIG_FILE = CONFIG_DIR / "tasks.json"
 SETUP_STATE_FILE = CONFIG_DIR / "setup_state.json"
 SETUP_SCRIPT = BASE_DIR / "setup_wizard.py"
+ERROR_REPORT_SCRIPT = BASE_DIR / "error_report.py"
 LOG_FILE = LOG_DIR / "launcher.log"
 LOCK_FILE = RUNTIME_DIR / "launcher.lock"
 STOP_FILE = RUNTIME_DIR / "stop.request"
+ERROR_REPORT_FILE = RUNTIME_DIR / "last_error_report.txt"
+SETUP_VERSION = 2
 
 LOCK_HELD = False
 
@@ -73,9 +77,80 @@ def log_error(message):
     logging.error(message)
 
 
+def format_failure_report(context, error, details=""):
+    lines = [
+        "TimedLauncher 已因异常停止运行。",
+        "",
+        f"发生时间：{datetime.now().astimezone().isoformat(timespec='seconds')}",
+        f"执行位置：{context}",
+        f"错误类型：{type(error).__name__}",
+        f"错误原因：{error}",
+        f"完整日志：{LOG_FILE}",
+    ]
+    if details:
+        lines.extend(["", "详细信息：", details.rstrip()])
+    return "\n".join(lines) + "\n"
+
+
+def launch_error_report(report_text):
+    """独立启动错误报告窗口，让主启动器可以正常退出。"""
+    try:
+        ERROR_REPORT_FILE.write_text(report_text, encoding="utf-8")
+        if not ERROR_REPORT_SCRIPT.is_file():
+            raise FileNotFoundError(f"找不到错误报告程序：{ERROR_REPORT_SCRIPT}")
+
+        interpreter = Path(sys.executable)
+        pythonw = interpreter.with_name("pythonw.exe")
+        if pythonw.is_file():
+            interpreter = pythonw
+
+        creationflags = 0
+        if platform.system().lower() == "windows":
+            creationflags = (
+                subprocess.CREATE_NEW_PROCESS_GROUP |
+                subprocess.DETACHED_PROCESS
+            )
+
+        subprocess.Popen(
+            [
+                str(interpreter),
+                "-B",
+                str(ERROR_REPORT_SCRIPT),
+                "--report-file",
+                str(ERROR_REPORT_FILE),
+                "--log-file",
+                str(LOG_FILE),
+            ],
+            cwd=str(BASE_DIR),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creationflags,
+        )
+        log_info(f"错误报告窗口已启动：{ERROR_REPORT_FILE}")
+        return True
+    except Exception as report_error:
+        log_error(f"无法启动错误报告窗口：{report_error}")
+        if platform.system().lower() == "windows":
+            try:
+                ctypes.windll.user32.MessageBoxW(
+                    None,
+                    report_text,
+                    "TimedLauncher 运行失败",
+                    0x10,
+                )
+            except Exception:
+                pass
+        return False
+
+
 def initial_setup_completed():
     state = load_json(SETUP_STATE_FILE, {})
-    return isinstance(state, dict) and state.get("completed") is True
+    return (
+        isinstance(state, dict)
+        and state.get("completed") is True
+        and state.get("setup_version") == SETUP_VERSION
+    )
 
 
 def run_setup_wizard():
@@ -300,12 +375,18 @@ def wait_for_process_exit(
     start_timeout,
     exit_timeout,
     stable_seconds,
+    minimum_wait=0,
+    timeout_is_error=True,
     restart_policy=None,
     restart_callback=None
 ):
     """确认目标进程已启动，再等待其退出并持续保持关闭状态。"""
     if not os.path.isfile(executable_path):
         raise RuntimeError(f"等待的程序不存在：{executable_path}")
+    if minimum_wait < 0:
+        raise RuntimeError("最短等待时间不能为负数")
+    if exit_timeout < minimum_wait:
+        raise RuntimeError("退出超时时间不能短于最短等待时间")
 
     start_deadline = time.monotonic() + start_timeout
     log_info(f"等待程序启动：{executable_path}，超时={start_timeout}s")
@@ -323,9 +404,14 @@ def wait_for_process_exit(
             raise RuntimeError(f"等待程序启动超时：{executable_path}")
         wait_interruptibly(1)
 
-    exit_deadline = time.monotonic() + exit_timeout
+    detected_at = time.monotonic()
+    minimum_deadline = detected_at + minimum_wait
+    exit_deadline = detected_at + exit_timeout
     absent_since = None
-    log_info(f"等待程序退出：{executable_path}，超时={exit_timeout}s")
+    log_info(
+        f"等待程序退出：{executable_path}，最短等待={minimum_wait}s，"
+        f"超时={exit_timeout}s"
+    )
 
     marker_watcher = None
     max_restarts = 0
@@ -427,11 +513,18 @@ def wait_for_process_exit(
                 log_info(f"目标程序已经退出，开始确认 {stable_seconds}s 稳定等待")
 
             if now - absent_since >= stable_seconds:
-                log_info(f"目标程序已连续关闭 {stable_seconds}s，继续后续流程")
-                return
+                if now >= minimum_deadline:
+                    log_info(f"目标程序已连续关闭 {stable_seconds}s，继续后续流程")
+                    return True
 
         if now >= exit_deadline:
-            raise RuntimeError(f"等待程序退出超时：{executable_path}")
+            if timeout_is_error:
+                raise RuntimeError(f"等待程序退出超时：{executable_path}")
+            log_warning(
+                f"等待程序退出已达到 {exit_timeout}s 上限，继续执行后续关闭步骤："
+                f"{executable_path}"
+            )
+            return False
         wait_interruptibly(1)
 
 
@@ -640,6 +733,49 @@ def close_process(process_or_pid, force=False):
     except Exception as e:
         log_error(f"关闭进程失败：PID={pid}，原因：{e}")
         return False
+
+
+def close_configured_processes(steps):
+    """异常结束时，按配置中的完整路径清理所有自动化工具和游戏。"""
+    configured_paths = []
+    seen_paths = set()
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        executable_path = str(step.get("path") or "").strip()
+        if not executable_path:
+            continue
+        normalized_path = os.path.normcase(
+            os.path.realpath(os.path.abspath(executable_path))
+        )
+        if normalized_path in seen_paths:
+            continue
+        seen_paths.add(normalized_path)
+        configured_paths.append(executable_path)
+
+    if not configured_paths:
+        return
+
+    log_warning("开始按已配置路径清理残留的自动化工具和游戏")
+    for force in (False, True):
+        found_running = False
+        for executable_path in configured_paths:
+            try:
+                matches = find_processes_by_path(executable_path)
+            except Exception as error:
+                log_error(f"扫描残留进程失败：{executable_path}，原因：{error}")
+                continue
+
+            for match in matches:
+                found_running = True
+                log_warning(
+                    f"清理残留进程：路径={executable_path}，"
+                    f"PID={match['pid']}，force={force}"
+                )
+                close_process(match["pid"], force=force)
+
+        if not force and found_running:
+            time.sleep(1)
 
 
 def activate_window(window_title=None, pid=None, quiet=False):
@@ -975,6 +1111,12 @@ def run_workflow(task, start_at=None):
                 stable_seconds = parse_duration(
                     step.get("after_exit", "00:00:10")
                 ).total_seconds()
+                minimum_wait = parse_duration(
+                    step.get("minimum_wait", "00:00:00")
+                ).total_seconds()
+                timeout_is_error = step.get("timeout_is_error", True)
+                if not isinstance(timeout_is_error, bool):
+                    raise RuntimeError("timeout_is_error 必须是布尔值")
 
                 restart_policy = None
                 restart_callback = None
@@ -1042,6 +1184,8 @@ def run_workflow(task, start_at=None):
                     start_timeout=start_timeout,
                     exit_timeout=exit_timeout,
                     stable_seconds=stable_seconds,
+                    minimum_wait=minimum_wait,
+                    timeout_is_error=timeout_is_error,
                     restart_policy=restart_policy,
                     restart_callback=restart_callback
                 )
@@ -1075,10 +1219,27 @@ def run_workflow(task, start_at=None):
                     log_info(f"目标程序未配置，已跳过关闭动作：{target}")
                     continue
                 force_close = step.get("force_close", False)
+                executable_path = step.get("path")
                 process = process_map.get(target)
 
                 if process is None:
                     raise RuntimeError(f"没有找到要关闭的目标：{target}")
+
+                if executable_path:
+                    matches = find_processes_by_path(executable_path)
+                    if not matches:
+                        log_info(f"目标程序已经退出：{target}，路径={executable_path}")
+                        continue
+
+                    failed_pids = []
+                    for match in matches:
+                        if not close_process(match["pid"], force=force_close):
+                            failed_pids.append(match["pid"])
+                    if failed_pids:
+                        raise RuntimeError(
+                            f"关闭失败：{target}，PID={failed_pids}"
+                        )
+                    continue
 
                 if is_process_running(process):
                     if not close_process(process, force=force_close):
@@ -1103,6 +1264,7 @@ def run_workflow(task, start_at=None):
                 time.sleep(0.5)
                 if is_process_running(process):
                     close_process(process, force=True)
+            close_configured_processes(all_steps)
 
 
 def main():
@@ -1140,13 +1302,18 @@ def main():
         log_info(f"项目目录：{BASE_DIR}")
         log_info(f"配置文件：{CONFIG_FILE}")
 
-        tasks = load_json(CONFIG_FILE, [])
+        tasks = load_json(CONFIG_FILE, None)
         if not isinstance(tasks, list):
-            log_error("tasks.json 顶层必须是数组")
+            error = RuntimeError("tasks.json 无法读取，或顶层不是数组")
+            log_error(str(error))
+            launch_error_report(
+                format_failure_report("读取流程配置", error)
+            )
             return 1
 
         stopped = False
         failed = False
+        failure_report = ""
 
         for task in tasks:
             if not isinstance(task, dict):
@@ -1172,12 +1339,19 @@ def main():
                 break
             except Exception as e:
                 log_error(f"流程执行失败：{task.get('name')}，原因：{e}")
+                failure_report = format_failure_report(
+                    f"流程：{task.get('name') or '未命名流程'}",
+                    e,
+                    traceback.format_exc(),
+                )
                 failed = True
+                break
 
         if stopped:
             log_info("TimedLauncher 已按用户请求安全停止")
         elif failed:
-            log_error("一个或多个流程执行失败，TimedLauncher 以错误状态退出")
+            log_error("流程执行失败，TimedLauncher 将退出并显示错误报告")
+            launch_error_report(failure_report)
         else:
             log_info("所有启动即执行流程已完成，TimedLauncher 自动退出")
         return 1 if failed else 0

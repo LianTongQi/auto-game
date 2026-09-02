@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '1.0.1'
+    [string]$Version = '1.1.0'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -88,6 +88,7 @@ New-Item -ItemType Directory -Force -Path $PackageDir | Out-Null
 $releaseFiles = @(
     'README.md',
     'configure_launcher.bat',
+    'error_report.py',
     'launcher_environment.bat',
     'requirements.txt',
     'runtime_manifest.json',
@@ -147,6 +148,10 @@ if ($LASTEXITCODE -ne 0) {
 & $pythonExe -B (Join-Path $PackageDir 'setup_wizard.py') --validate-mapping
 if ($LASTEXITCODE -ne 0) {
     throw 'Setup wizard mapping validation failed'
+}
+& $pythonExe -B (Join-Path $PackageDir 'error_report.py') --check
+if ($LASTEXITCODE -ne 0) {
+    throw 'Error report UI validation failed'
 }
 & $pythonExe -B -m unittest discover -s (Join-Path $ProjectDir 'tests') -p 'test_*.py'
 if ($LASTEXITCODE -ne 0) {

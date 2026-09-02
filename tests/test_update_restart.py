@@ -44,6 +44,81 @@ class AppendedLogMarkerWatcherTests(unittest.TestCase):
 
 
 class WaitForProcessExitTests(unittest.TestCase):
+    def test_early_exit_still_observes_minimum_wait(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            executable_path = Path(temp_dir) / "MAA.exe"
+            executable_path.touch()
+            current_time = 0.0
+            process_checks = 0
+
+            def monotonic():
+                return current_time
+
+            def wait_interruptibly(seconds):
+                nonlocal current_time
+                current_time += seconds
+
+            def find_processes(_path):
+                nonlocal process_checks
+                process_checks += 1
+                if process_checks == 1:
+                    return [{"pid": 101, "path": str(executable_path)}]
+                return []
+
+            with mock.patch.object(
+                launcher, "find_processes_by_path", side_effect=find_processes
+            ), mock.patch.object(
+                launcher, "wait_interruptibly", side_effect=wait_interruptibly
+            ), mock.patch.object(
+                launcher.time, "monotonic", side_effect=monotonic
+            ), mock.patch.object(launcher, "check_stop_requested"):
+                completed = launcher.wait_for_process_exit(
+                    executable_path=str(executable_path),
+                    start_timeout=60,
+                    exit_timeout=900,
+                    stable_seconds=0,
+                    minimum_wait=60,
+                    timeout_is_error=False,
+                )
+
+            self.assertTrue(completed)
+            self.assertEqual(current_time, 60)
+
+    def test_non_error_timeout_allows_following_close_step(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            executable_path = Path(temp_dir) / "MAA.exe"
+            executable_path.touch()
+            current_time = 0.0
+
+            def monotonic():
+                return current_time
+
+            def wait_interruptibly(seconds):
+                nonlocal current_time
+                current_time += seconds
+
+            running_process = [{"pid": 101, "path": str(executable_path)}]
+            with mock.patch.object(
+                launcher,
+                "find_processes_by_path",
+                return_value=running_process,
+            ), mock.patch.object(
+                launcher, "wait_interruptibly", side_effect=wait_interruptibly
+            ), mock.patch.object(
+                launcher.time, "monotonic", side_effect=monotonic
+            ), mock.patch.object(launcher, "check_stop_requested"):
+                completed = launcher.wait_for_process_exit(
+                    executable_path=str(executable_path),
+                    start_timeout=60,
+                    exit_timeout=15,
+                    stable_seconds=0,
+                    minimum_wait=1,
+                    timeout_is_error=False,
+                )
+
+            self.assertFalse(completed)
+            self.assertEqual(current_time, 15)
+
     def test_update_restart_relaunches_once_then_waits_for_final_exit(self):
         marker = "游戏更新成功, 游戏即将重启"
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -214,6 +289,46 @@ class WorkflowRestartConfigurationTests(unittest.TestCase):
                     / "ok-script.log"
                 ).resolve(),
             )
+
+    def test_close_step_uses_configured_path_for_remaining_instances(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            executable_path = Path(temp_dir) / "MAA.exe"
+            executable_path.touch()
+            task = {
+                "name": "MAA 关闭测试",
+                "steps": [
+                    {
+                        "type": "launch",
+                        "name": "MAA",
+                        "path": str(executable_path),
+                        "args": [],
+                        "working_dir": str(executable_path.parent),
+                        "save_as": "MAA",
+                    },
+                    {
+                        "type": "close",
+                        "target": "MAA",
+                        "path": str(executable_path),
+                        "force_close": True,
+                    },
+                ],
+            }
+            launched = mock.Mock(pid=101)
+
+            with mock.patch.object(
+                launcher, "launch_program", return_value=launched
+            ), mock.patch.object(
+                launcher,
+                "find_processes_by_path",
+                return_value=[{"pid": 202, "path": str(executable_path)}],
+            ), mock.patch.object(
+                launcher, "close_process", return_value=True
+            ) as close_process, mock.patch.object(
+                launcher, "check_stop_requested"
+            ):
+                launcher.run_workflow(task)
+
+            close_process.assert_called_once_with(202, force=True)
 
 
 if __name__ == "__main__":
