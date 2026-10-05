@@ -93,6 +93,7 @@ $releaseFiles = @(
     'requirements.txt',
     'runtime_manifest.json',
     'scheduler_launcher.py',
+    'supervision.py',
     'setup_wizard.py',
     'start_launcher.bat',
     'start_launcher_hidden.bat',

@@ -69,7 +69,7 @@ PROGRAM_FIELDS = (
         "maa",
         "5. MAA",
         "MAA.exe",
-        "至少等待 1 分钟，最长运行 15 分钟",
+        "至少等待 1 分钟，最长运行 30 分钟",
         "https://github.com/MaaAssistantArknights/MaaAssistantArknights/releases",
     ),
     ProgramField(

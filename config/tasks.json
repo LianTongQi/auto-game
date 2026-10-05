@@ -74,7 +74,8 @@
       {
         "type": "wait",
         "duration": "00:00:05",
-        "requires": ["March7th"]
+        "requires": ["March7th"],
+        "verify_closed": "March7th"
       },
       {
         "type": "launch",
@@ -137,7 +138,7 @@
         "requires": ["MAA"],
         "start_timeout": "00:01:00",
         "minimum_wait": "00:01:00",
-        "exit_timeout": "00:15:00",
+        "exit_timeout": "00:30:00",
         "after_exit": "00:00:00",
         "timeout_is_error": false
       },
@@ -170,6 +171,11 @@
         "repeat": 1,
         "interval": 0.2,
         "window_timeout": 30
+      },
+      {
+        "type": "wait_completion",
+        "target": "C",
+        "requires": ["C"]
       }
     ]
   }

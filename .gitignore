@@ -18,6 +18,8 @@ launcher.lock
 stop.request
 config/setup_state.json
 config/backups/
+config/miyoushe_checkin.json
+config/secrets*
 
 # Local tooling
 .agents/

@@ -13,6 +13,7 @@ from ctypes import wintypes
 from pathlib import Path
 from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
+from supervision import LOG_PATTERNS, RunStatus, Stage, identity, maaend_game_paths, onedragon_game_paths
 
 try:
     import psutil
@@ -86,6 +87,7 @@ def format_failure_report(context, error, details=""):
         f"错误类型：{type(error).__name__}",
         f"错误原因：{error}",
         f"完整日志：{LOG_FILE}",
+        f"本轮状态：{RUNTIME_DIR / 'run_status.json'}",
     ]
     if details:
         lines.extend(["", "详细信息：", details.rstrip()])
@@ -284,19 +286,25 @@ def find_processes_by_path(executable_path):
     )
     matches = []
 
-    for process in psutil.process_iter(["pid", "exe"]):
+    psutil.process_iter.cache_clear()  # Do not reuse a cached Process after PID reuse.
+    for process in psutil.process_iter(["pid", "exe", "name", "create_time"]):
         try:
             actual_path = process.info.get("exe")
             if not actual_path:
+                if str(process.info.get("name") or "").casefold() == Path(executable_path).name.casefold():
+                    raise RuntimeError(f"无法读取目标进程身份（PID={process.pid}），不能将权限不足视作退出")
                 continue
 
             actual_path = os.path.normcase(
                 os.path.realpath(os.path.abspath(actual_path))
             )
             if actual_path == target_path:
+                if process.info.get("create_time") is None:
+                    raise RuntimeError(f"无法读取目标进程创建时间：PID={process.pid}")
                 matches.append({
                     "pid": process.info["pid"],
-                    "path": process.info["exe"]
+                    "path": process.info["exe"],
+                    "create_time": process.info["create_time"]
                 })
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
@@ -470,6 +478,8 @@ def wait_for_process_exit(
                 )
 
         if restart_pending:
+            if now >= exit_deadline:
+                raise RuntimeError("更新恢复期间已达到本阶段运行上限")
             if not current_pids:
                 saw_restart_absence = True
                 replacement_pids = None
@@ -490,7 +500,6 @@ def wait_for_process_exit(
                     restart_pending = False
                     active_cycle_pids = set(current_pids)
                     absent_since = None
-                    exit_deadline = now + exit_timeout
                     marker_watcher.reset_to_end()
                     log_info(
                         f"更新后已重新启动 OK-WW（第 {restart_count}/{max_restarts} 次），"
@@ -735,7 +744,7 @@ def close_process(process_or_pid, force=False):
         return False
 
 
-def close_configured_processes(steps):
+def close_configured_processes(steps, baseline=None):
     """异常结束时，按配置中的完整路径清理所有自动化工具和游戏。"""
     configured_paths = []
     seen_paths = set()
@@ -767,6 +776,8 @@ def close_configured_processes(steps):
                 continue
 
             for match in matches:
+                if baseline and identity(match) in baseline.get(str(Path(executable_path).resolve()), set()):
+                    continue
                 found_running = True
                 log_warning(
                     f"清理残留进程：路径={executable_path}，"
@@ -776,6 +787,13 @@ def close_configured_processes(steps):
 
         if not force and found_running:
             time.sleep(1)
+
+    if baseline is not None:
+        for executable_path in configured_paths:
+            remaining = [p for p in find_processes_by_path(executable_path)
+                         if identity(p) not in baseline.get(str(Path(executable_path).resolve()), set())]
+            if remaining:
+                raise RuntimeError(f"异常清理后仍有残留进程：{executable_path}，PID={[p['pid'] for p in remaining]}")
 
 
 def activate_window(window_title=None, pid=None, quiet=False):
@@ -821,6 +839,7 @@ def activate_window(window_title=None, pid=None, quiet=False):
             user32.GetForegroundWindow.restype = wintypes.HWND
 
         if pid and user32:
+            allowed_pids = {int(p) for p in pid} if isinstance(pid, (list, set, tuple)) else {int(pid)}
             found_windows = []
             title_filter = str(window_title).casefold() if window_title else None
 
@@ -829,7 +848,7 @@ def activate_window(window_title=None, pid=None, quiet=False):
                 process_id = wintypes.DWORD()
                 user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
 
-                if process_id.value != int(pid) or not user32.IsWindowVisible(hwnd):
+                if process_id.value not in allowed_pids or not user32.IsWindowVisible(hwnd):
                     return True
 
                 title_length = user32.GetWindowTextLengthW(hwnd)
@@ -860,7 +879,7 @@ def activate_window(window_title=None, pid=None, quiet=False):
                         log_info(f"已激活进程窗口：{title}，PID={pid}")
                     return True
 
-        if window_title:
+        if window_title and not pid:
             import pygetwindow as gw
 
             windows = gw.getWindowsWithTitle(window_title)
@@ -891,6 +910,95 @@ def activate_window(window_title=None, pid=None, quiet=False):
     return False
 
 
+def foreground_matches(pids, expected=None):
+    if platform.system().lower() != "windows":
+        return False
+    allowed = set(pids) if isinstance(pids, (list, set, tuple)) else {int(pids)}
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), ctypes.byref(pid))
+    if pid.value not in allowed:
+        return False
+    if expected:
+        try:
+            return psutil.Process(pid.value).create_time() == expected.get(pid.value)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return False
+    return True
+
+
+class ToolProcesses:
+    """Track PID + creation time, including launcher-spawned UI workers."""
+    def __init__(self, path):
+        self.path = path
+        self.known = {}
+
+    def track(self, process):
+        try:
+            current = psutil.Process(process.pid)
+            self.known[current.pid] = current.create_time()
+        except psutil.NoSuchProcess:
+            pass
+
+    def current(self, include_games=False):
+        for item in find_processes_by_path(self.path):
+            self.known[item["pid"]] = item["create_time"]
+        matches = {}
+        for pid, created in list(self.known.items()):
+            try:
+                process = psutil.Process(pid)
+                if process.create_time() != created or not process.is_running():
+                    continue
+                for child in process.children(recursive=True):
+                    try:
+                        child_created = child.create_time()
+                        self.known[child.pid] = child_created
+                        matches[child.pid] = {"pid": child.pid, "create_time": child_created}
+                    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                        continue
+                matches[pid] = {"pid": pid, "create_time": created}
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                continue
+            except psutil.AccessDenied as error:
+                raise RuntimeError(f"无法监测本轮工具进程身份：PID={pid}") from error
+        if include_games:
+            return list(matches.values())
+        # A tool may spawn the game as its own descendant. Keep ownership for
+        # cleanup, but do not mistake a surviving game for a surviving tool.
+        game_names = {"yuanshen.exe", "starrail.exe", "client-win64-shipping.exe",
+                      "zenlesszonezero.exe", "endfield.exe"}
+        excluded = set()
+        for pid in matches:
+            try:
+                process = psutil.Process(pid)
+                if process.name().casefold() in game_names:
+                    excluded.add(pid)
+                    excluded.update(child.pid for child in process.children(recursive=True))
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                excluded.add(pid)
+            except psutil.AccessDenied as error:
+                raise RuntimeError(f"无法区分本轮游戏与工具进程：PID={pid}") from error
+        return [item for pid, item in matches.items() if pid not in excluded]
+
+    def close(self, force=True):
+        errors = []
+        for item in self.current(include_games=True):
+            try:
+                process = psutil.Process(item["pid"])
+                if process.create_time() == item["create_time"]:
+                    if not close_process(process.pid, force=force):
+                        errors.append(f"无法关闭本轮工具进程：PID={process.pid}")
+            except psutil.NoSuchProcess:
+                continue
+        alive = self.current(include_games=True)
+        if alive:
+            errors.append(f"关闭后仍存活：PID={[p['pid'] for p in alive]}")
+        if alive and errors:
+            raise RuntimeError("；".join(errors))
+
+
 def execute_key_action(action, target_pid=None):
     """
     mode = press  ：普通按键，可以逐个按 keys
@@ -901,6 +1009,7 @@ def execute_key_action(action, target_pid=None):
         import pyautogui
 
         window_title = action.get("window_title")
+        expected = action.get("_process_identities")
         if not target_pid and not window_title:
             log_error("按键动作缺少 target 或 window_title，已跳过")
             return False
@@ -939,6 +1048,8 @@ def execute_key_action(action, target_pid=None):
 
         for i in range(repeat):
             check_stop_requested()
+            if target_pid and not foreground_matches(target_pid, expected):
+                raise RuntimeError("发送按键前焦点已离开目标程序；停止，避免误操作其他窗口")
 
             if mode == "hotkey":
                 if not keys:
@@ -951,6 +1062,8 @@ def execute_key_action(action, target_pid=None):
                     log_warning("press 模式缺少 keys")
                     return False
                 for key in keys:
+                    if target_pid and not foreground_matches(target_pid, expected):
+                        raise RuntimeError("目标窗口焦点已改变，停止发送按键")
                     pyautogui.press(key)
 
             elif mode == "write":
@@ -979,7 +1092,7 @@ def execute_key_action(action, target_pid=None):
 
     except Exception as e:
         log_error(f"按键动作执行失败：{e}")
-        return False
+        raise RuntimeError(f"按键动作失败：{type(e).__name__}：{e}") from e
 
 
 def run_workflow(task, start_at=None):
@@ -992,6 +1105,9 @@ def run_workflow(task, start_at=None):
     process_map = {}
     launch_spec_map = {}
     skipped_processes = set()
+    stage_map = {}
+    tracker_map = {}
+    exit_key_sent = set()
 
     all_steps = task.get("steps", [])
     setup_paths = {}
@@ -1020,6 +1136,22 @@ def run_workflow(task, start_at=None):
         steps = steps[start_index:]
         log_info(f"本次从指定步骤开始：{start_at}")
 
+    supervised = any(s.get("type") == "launch" and s.get("setup_key") in LOG_PATTERNS
+                     for s in steps if isinstance(s, dict))
+    status = RunStatus(RUNTIME_DIR / "run_status.json") if supervised else None
+    cleanup_steps = list(all_steps)
+    for s in steps:
+        if s.get("type") == "launch" and s.get("setup_key") in {"maaend", "onedragon"} and s.get("path"):
+            root = s.get("working_dir") or str(Path(s["path"]).parent)
+            discover = maaend_game_paths if s["setup_key"] == "maaend" else onedragon_game_paths
+            cleanup_steps.extend({"path": p} for p in discover(root))
+    baseline = None
+    if supervised:
+        baseline = {}
+        for s in cleanup_steps:
+            path = s.get("path")
+            if path:
+                baseline[str(Path(path).resolve())] = {identity(p) for p in find_processes_by_path(path)}
     completed = False
 
     try:
@@ -1074,6 +1206,8 @@ def run_workflow(task, start_at=None):
                 ]
                 if not str(step.get("path") or "").strip() or missing_setup_keys:
                     skipped_processes.add(save_as)
+                    if status:
+                        status.stage(save_as, "SKIPPED", note="未配置完整路径")
                     missing_text = ", ".join(missing_setup_keys) or "程序路径"
                     log_info(
                         f"未配置完整路径，跳过程序及其关联步骤："
@@ -1081,12 +1215,52 @@ def run_workflow(task, start_at=None):
                     )
                     continue
 
+                profile = step.get("setup_key")
+                if profile in LOG_PATTERNS:
+                    if find_processes_by_path(launch_task["path"]):
+                        raise RuntimeError(f"{save_as} 已经在运行，停止以避免重复启动或误按 F10")
+                    tracker = ToolProcesses(launch_task["path"])
+                    tracker_map[save_as] = tracker
+
+                    def relaunch(target=save_as, spec=launch_task, owned=tracker):
+                        if owned.current():
+                            raise RuntimeError(f"{target} 更新恢复时旧实例仍存在，拒绝重复启动")
+                        restarted = launch_program(spec)
+                        if restarted is not None:
+                            process_map[target] = restarted
+                            owned.track(restarted)
+                        return restarted
+
+                    def key_for_owned(action, tools):
+                        verified_action = dict(action)
+                        verified_action["_process_identities"] = {p["pid"]: p["create_time"] for p in tools}
+                        return execute_key_action(verified_action, target_pid=[p["pid"] for p in tools])
+
+                    budget = 1800
+                    for later in steps:
+                        if later.get("type") == "wait_process_exit" and save_as in later.get("requires", []):
+                            budget = parse_duration(later.get("exit_timeout", "00:30:00")).total_seconds()
+                            break
+                    root = launch_task["working_dir"] or Path(launch_task["path"]).parent
+                    native_game_paths = (maaend_game_paths(root) if profile == "maaend" else
+                                         onedragon_game_paths(root) if profile == "onedragon" else [])
+                    stage_map[save_as] = Stage(save_as, profile, launch_task, budget, status, {
+                        "tools": tracker.current, "scan": find_processes_by_path,
+                        "relaunch": relaunch, "key": key_for_owned,
+                        "wait": wait_interruptibly, "check": check_stop_requested,
+                        "info": log_info, "warn": log_warning,
+                        "game_path": (native_game_paths[0] if native_game_paths else setup_paths.get({
+                            "bettergi": "genshin", "march7th": "starrail",
+                            "okww": "wuthering_client"}.get(profile, ""))),
+                    })
                 process = launch_program(launch_task)
                 if process is None:
                     raise RuntimeError(f"启动失败：{step.get('name')}")
 
                 process_map[save_as] = process
                 launch_spec_map[save_as] = launch_task
+                if save_as in tracker_map:
+                    tracker_map[save_as].track(process)
                 log_info(f"已记录进程：{save_as}，PID={process.pid}")
 
             elif step_type == "wait":
@@ -1094,7 +1268,19 @@ def run_workflow(task, start_at=None):
                 wait_seconds = parse_duration(duration_text).total_seconds()
 
                 log_info(f"等待 {duration_text}")
-                wait_interruptibly(wait_seconds)
+                wait_deadline = time.monotonic() + wait_seconds
+                while time.monotonic() < wait_deadline:
+                    for monitored in stage_map.values():
+                        if monitored.state in {"STARTING", "RUNNING", "UPDATING"}:
+                            monitored.poll()
+                            monitored.check_deadline()
+                    wait_interruptibly(min(1, max(0, wait_deadline - time.monotonic())))
+                verify_target = step.get("verify_closed") or next(
+                    (a for a in required_aliases if a in exit_key_sent), None)
+                if verify_target:
+                    target = verify_target
+                    if target in tracker_map and tracker_map[target].current():
+                        raise RuntimeError(f"{target} 回车后仍未退出，停止以防多个工具同时运行")
 
             elif step_type == "wait_process_exit":
                 executable_path = step.get("path")
@@ -1117,6 +1303,13 @@ def run_workflow(task, start_at=None):
                 timeout_is_error = step.get("timeout_is_error", True)
                 if not isinstance(timeout_is_error, bool):
                     raise RuntimeError("timeout_is_error 必须是布尔值")
+
+                monitor_alias = next((a for a in required_aliases if a in stage_map), None)
+                if monitor_alias:
+                    stage_map[monitor_alias].wait_exit(
+                        executable_path, start_timeout, stable_seconds, minimum_wait, timeout_is_error
+                    )
+                    continue
 
                 restart_policy = None
                 restart_callback = None
@@ -1210,8 +1403,37 @@ def run_workflow(task, start_at=None):
                 }
 
                 log_info(f"执行按键：target={target}, action={action}")
+                monitor = stage_map.get(target)
+                if monitor:
+                    monitor.check_deadline()
+                    action["window_timeout"] = min(float(action["window_timeout"]),
+                                                   max(0, monitor.deadline - time.monotonic()))
+                if monitor and monitor.profile == "maaend":
+                    action["window_title"] = action["window_title"] or "MaaEnd"
+                if monitor and action["keys"] == ["f10"]:
+                    monitor.send_start_key(action)
+                    continue
+                if target in tracker_map:
+                    owned_tools = tracker_map[target].current()
+                    if (not owned_tools and monitor and monitor.profile == "march7th"
+                            and monitor.state in {"SUCCEEDED", "UNVERIFIED_EXIT"}
+                            and action["keys"] == ["enter"]):
+                        log_info("March7th 已自行退出，无需再发送回车")
+                        continue
+                    target_pid = [p["pid"] for p in owned_tools]
+                    action["_process_identities"] = {p["pid"]: p["create_time"] for p in owned_tools}
                 if not execute_key_action(action, target_pid=target_pid):
                     raise RuntimeError(f"按键执行失败：target={target}")
+                if monitor and monitor.profile == "march7th" and action["keys"] == ["enter"]:
+                    exit_key_sent.add(target)
+
+            elif step_type == "wait_completion":
+                target = step.get("target")
+                if target in skipped_processes:
+                    continue
+                if target not in stage_map:
+                    raise RuntimeError(f"完成监测目标不存在：{target}")
+                stage_map[target].wait_completion()
 
             elif step_type == "close":
                 target = step.get("target")
@@ -1224,6 +1446,10 @@ def run_workflow(task, start_at=None):
 
                 if process is None:
                     raise RuntimeError(f"没有找到要关闭的目标：{target}")
+
+                if target in tracker_map:
+                    tracker_map[target].close(force=force_close)
+                    continue
 
                 if executable_path:
                     matches = find_processes_by_path(executable_path)
@@ -1250,8 +1476,25 @@ def run_workflow(task, start_at=None):
             else:
                 raise RuntimeError(f"未知步骤类型：{step_type}")
 
+        # Older local configurations ended immediately after MaaEnd's F10.
+        # Upgrade that behavior without rewriting personal paths or task choices.
+        for monitored in stage_map.values():
+            if monitored.profile == "maaend" and monitored.state != "SUCCEEDED":
+                monitored.wait_completion()
         completed = True
+        if status:
+            uncertain = [a for a, s in status.data["stages"].items()
+                         if s["state"] not in {"SUCCEEDED", "SKIPPED"}]
+            active = [s for s in status.data["stages"].values() if s["state"] != "SKIPPED"]
+            status.finish("COMPLETED_WITH_WARNINGS" if uncertain else "SUCCEEDED" if active else "NO_TASKS",
+                          ", ".join(uncertain))
+            if uncertain:
+                log_warning(f"流程结束，但以下阶段未确认成功：{', '.join(uncertain)}")
         log_info(f"流程执行完成：{task.get('name')}")
+    except BaseException as error:
+        if status:
+            status.finish("STOPPED" if isinstance(error, StopRequested) else "FAILED", error)
+        raise
     finally:
         if not completed:
             log_warning(f"流程异常，清理已启动的程序：{task.get('name')}")
@@ -1264,7 +1507,55 @@ def run_workflow(task, start_at=None):
                 time.sleep(0.5)
                 if is_process_running(process):
                     close_process(process, force=True)
-            close_configured_processes(all_steps)
+            cleanup_errors = []
+            for target, tracker in tracker_map.items():
+                try:
+                    tracker.close(force=True)
+                except Exception as error:
+                    cleanup_errors.append(f"{target}: {error}")
+            try:
+                close_configured_processes(cleanup_steps, baseline=baseline)
+            except Exception as error:
+                cleanup_errors.append(str(error))
+            if cleanup_errors:
+                error_text = "；".join(cleanup_errors)
+                log_error(f"异常清理不完整：{error_text}")
+                if status:
+                    status.data["cleanup_errors"] = cleanup_errors
+                    status.save()
+                raise RuntimeError(f"原流程失败，且异常清理不完整：{error_text}")
+
+
+def start_miyoushe_checkin_background():
+    """Preserve optional local check-in integration; no private settings shipped."""
+    settings_file = CONFIG_DIR / "miyoushe_checkin.json"
+    if not settings_file.is_file():
+        return None
+    try:
+        settings = load_json(settings_file, {})
+        if not isinstance(settings, dict) or settings.get("enabled") is not True:
+            return None
+        executable = Path(settings["pythonw_path"])
+        script = Path(settings["script_path"])
+        working_dir = Path(settings["working_dir"])
+        if not executable.is_absolute() or not script.is_absolute() or not working_dir.is_absolute():
+            raise ValueError("签到程序需要完整路径")
+        if not executable.is_file() or not script.is_file() or not working_dir.is_dir():
+            raise FileNotFoundError("签到程序或运行环境不存在")
+        environment = os.environ.copy()
+        environment.update({"PYTHONUTF8": "1", "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1"})
+        process = subprocess.Popen(
+            [str(executable), "-B", str(script), "auto-checkin", "--notify"],
+            cwd=str(working_dir), env=environment,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
+            close_fds=True,
+        )
+        log_info(f"米游社后台签到已启动，PID={process.pid}；结果由签到程序独立记录")
+        return process
+    except (KeyError, TypeError, ValueError, OSError) as error:
+        log_warning(f"米游社后台签到未启动：{error}；继续游戏自动化")
+        return None
 
 
 def main():
@@ -1315,6 +1606,8 @@ def main():
         failed = False
         failure_report = ""
 
+        start_miyoushe_checkin_background()
+
         for task in tasks:
             if not isinstance(task, dict):
                 log_error("tasks.json 中存在非对象任务，已跳过")
@@ -1353,7 +1646,7 @@ def main():
             log_error("流程执行失败，TimedLauncher 将退出并显示错误报告")
             launch_error_report(failure_report)
         else:
-            log_info("所有启动即执行流程已完成，TimedLauncher 自动退出")
+            log_info("启动即执行流程已结束，具体完成证据及警告见 runtime/run_status.json；TimedLauncher 自动退出")
         return 1 if failed else 0
     finally:
         clear_stop_request()
