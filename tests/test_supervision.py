@@ -411,6 +411,7 @@ class CleanupTests(unittest.TestCase):
         tracker = launcher.ToolProcesses("ok-ww.exe")
         tracker.known = {1: 1}
         with mock.patch.object(launcher, "find_processes_by_path", return_value=[]), \
+             mock.patch.object(launcher, "is_process_running", return_value=True), \
              mock.patch.object(launcher.psutil, "Process", side_effect=lambda pid: {1: tool, 2: game, 3: crash}[pid]):
             self.assertEqual([p["pid"] for p in tracker.current()], [1])
             self.assertEqual({p["pid"] for p in tracker.current(include_games=True)}, {1, 2, 3})

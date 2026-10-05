@@ -292,6 +292,8 @@ def find_processes_by_path(executable_path):
             actual_path = process.info.get("exe")
             if not actual_path:
                 if str(process.info.get("name") or "").casefold() == Path(executable_path).name.casefold():
+                    if not is_process_running(process.pid):
+                        continue
                     raise RuntimeError(f"无法读取目标进程身份（PID={process.pid}），不能将权限不足视作退出")
                 continue
 
@@ -299,6 +301,8 @@ def find_processes_by_path(executable_path):
                 os.path.realpath(os.path.abspath(actual_path))
             )
             if actual_path == target_path:
+                if not is_process_running(process.pid):
+                    continue
                 if process.info.get("create_time") is None:
                     raise RuntimeError(f"无法读取目标进程创建时间：PID={process.pid}")
                 matches.append({
@@ -674,6 +678,50 @@ def get_process_pid(process_or_pid):
     return int(process_or_pid)
 
 
+def wait_pid_termination(process_or_pid, timeout=10):
+    """Confirm termination, even while Windows retains a terminated PID."""
+    if isinstance(process_or_pid, subprocess.Popen):
+        try:
+            process_or_pid.wait(timeout=timeout)
+            return True
+        except subprocess.TimeoutExpired:
+            return False
+
+    pid = get_process_pid(process_or_pid)
+    if platform.system().lower() == "windows":
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        # SYNCHRONIZE is sufficient to observe the actual termination signal.
+        handle = kernel32.OpenProcess(0x00100000, False, pid)
+        if not handle:
+            error = ctypes.get_last_error()
+            if error == 87:  # ERROR_INVALID_PARAMETER: PID no longer exists.
+                return True
+            raise RuntimeError(f"无法确认进程退出：PID={pid}，Windows 错误={error}")
+        try:
+            result = kernel32.WaitForSingleObject(handle, max(0, int(timeout * 1000)))
+            if result == 0:  # WAIT_OBJECT_0: terminated, not merely requested.
+                return True
+            if result == 258:  # WAIT_TIMEOUT
+                return False
+            raise RuntimeError(f"等待进程退出失败：PID={pid}，Windows 错误={ctypes.get_last_error()}")
+        finally:
+            kernel32.CloseHandle(handle)
+
+    try:
+        psutil.Process(pid).wait(timeout=timeout)
+        return True
+    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+        return True
+    except psutil.TimeoutExpired:
+        return False
+
+
 def is_process_running(process_or_pid):
     if isinstance(process_or_pid, subprocess.Popen):
         return process_or_pid.poll() is None
@@ -681,6 +729,9 @@ def is_process_running(process_or_pid):
     pid = get_process_pid(process_or_pid)
     if psutil is None:
         return False
+
+    if platform.system().lower() == "windows":
+        return not wait_pid_termination(pid, timeout=0)
 
     try:
         process = psutil.Process(pid)
@@ -715,14 +766,16 @@ def close_process(process_or_pid, force=False):
             )
 
             if result.returncode == 0:
-                if isinstance(process_or_pid, subprocess.Popen):
-                    try:
-                        process_or_pid.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        pass
+                if not wait_pid_termination(process_or_pid, timeout=10):
+                    log_error(f"关闭命令已执行，但 10 秒内未确认退出：PID={pid}")
+                    return False
                 log_info(f"关闭成功：PID={pid}")
                 return True
 
+            # The process can exit on its own between the check and taskkill.
+            if wait_pid_termination(process_or_pid, timeout=0):
+                log_info(f"进程已在关闭期间退出：PID={pid}")
+                return True
             log_warning(f"关闭失败：PID={pid}，输出：{result.stderr or result.stdout}")
             return False
 
@@ -949,10 +1002,12 @@ class ToolProcesses:
         for pid, created in list(self.known.items()):
             try:
                 process = psutil.Process(pid)
-                if process.create_time() != created or not process.is_running():
+                if process.create_time() != created or not is_process_running(pid):
                     continue
                 for child in process.children(recursive=True):
                     try:
+                        if not is_process_running(child.pid):
+                            continue
                         child_created = child.create_time()
                         self.known[child.pid] = child_created
                         matches[child.pid] = {"pid": child.pid, "create_time": child_created}
