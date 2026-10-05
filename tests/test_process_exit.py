@@ -77,7 +77,16 @@ class CloseTests(unittest.TestCase):
         with mock.patch.object(launcher.subprocess, "run", return_value=result), \
              mock.patch.object(launcher, "wait_pid_termination", return_value=True) as wait:
             self.assertTrue(launcher.close_process(42))
-        wait.assert_called_once_with(42, timeout=0)
+        wait.assert_called_once_with(42, timeout=10)
+
+    def test_partial_tree_error_still_waits_for_delayed_root_exit(self):
+        result = mock.Mock(returncode=1, stderr="child no longer exists", stdout="")
+        def delayed_exit(_pid, timeout):
+            return timeout >= 0.2
+        with mock.patch.object(launcher.subprocess, "run", return_value=result), \
+             mock.patch.object(launcher, "wait_pid_termination", side_effect=delayed_exit) as wait:
+            self.assertTrue(launcher.close_process(42, force=True))
+        wait.assert_called_once_with(42, timeout=10)
 
     def test_failed_command_and_live_process_remains_failure(self):
         result = mock.Mock(returncode=1, stderr="access denied", stdout="")

@@ -772,8 +772,9 @@ def close_process(process_or_pid, force=False):
                 log_info(f"关闭成功：PID={pid}")
                 return True
 
-            # The process can exit on its own between the check and taskkill.
-            if wait_pid_termination(process_or_pid, timeout=0):
+            # A tree kill can report errors for vanished children while the
+            # root is still terminating. Apply the same bounded confirmation.
+            if wait_pid_termination(process_or_pid, timeout=10):
                 log_info(f"进程已在关闭期间退出：PID={pid}")
                 return True
             log_warning(f"关闭失败：PID={pid}，输出：{result.stderr or result.stdout}")
