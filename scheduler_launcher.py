@@ -1110,6 +1110,11 @@ def run_workflow(task, start_at=None):
     exit_key_sent = set()
 
     all_steps = task.get("steps", [])
+    for index, configured in enumerate(all_steps, 1):
+        if not isinstance(configured, dict):
+            raise RuntimeError(f"第 {index} 步必须是 JSON 对象")
+        if configured.get("type") not in {"launch", "wait", "wait_process_exit", "key", "close", "wait_completion"}:
+            raise RuntimeError(f"第 {index} 步的类型无效：{configured.get('type')}")
     setup_paths = {}
     for configured_step in all_steps:
         if not isinstance(configured_step, dict):
@@ -1139,22 +1144,26 @@ def run_workflow(task, start_at=None):
     supervised = any(s.get("type") == "launch" and s.get("setup_key") in LOG_PATTERNS
                      for s in steps if isinstance(s, dict))
     status = RunStatus(RUNTIME_DIR / "run_status.json") if supervised else None
-    cleanup_steps = list(all_steps)
-    for s in steps:
-        if s.get("type") == "launch" and s.get("setup_key") in {"maaend", "onedragon"} and s.get("path"):
-            root = s.get("working_dir") or str(Path(s["path"]).parent)
-            discover = maaend_game_paths if s["setup_key"] == "maaend" else onedragon_game_paths
-            cleanup_steps.extend({"path": p} for p in discover(root))
+    cleanup_steps = []
+    configured_cleanup_steps = list(steps)
     baseline = None
-    if supervised:
-        baseline = {}
-        for s in cleanup_steps:
-            path = s.get("path")
-            if path:
-                baseline[str(Path(path).resolve())] = {identity(p) for p in find_processes_by_path(path)}
     completed = False
 
     try:
+        if status:
+            status.step(0, len(steps), "preflight")
+        for s in steps:
+            if s.get("type") == "launch" and s.get("setup_key") in {"maaend", "onedragon"} and s.get("path"):
+                root = s.get("working_dir") or str(Path(s["path"]).parent)
+                discover = maaend_game_paths if s["setup_key"] == "maaend" else onedragon_game_paths
+                alias = s.get("save_as") or s.get("name")
+                configured_cleanup_steps.extend({"path": p, "requires": [alias]} for p in discover(root))
+        if supervised:
+            baseline = {}
+            for s in configured_cleanup_steps:
+                path = s.get("path")
+                if path:
+                    baseline[str(Path(path).resolve())] = {identity(p) for p in find_processes_by_path(path)}
         for index, step in enumerate(steps, start=1):
             check_stop_requested()
 
@@ -1180,6 +1189,9 @@ def run_workflow(task, start_at=None):
                 continue
 
             log_info(f"执行第 {index} 步：{step_type}")
+            if status:
+                alias = step.get("save_as") or step.get("target") or next(iter(required_aliases), None)
+                status.step(index, len(steps), step_type, alias)
 
             if step_type == "launch":
                 launch_task = {
@@ -1261,6 +1273,14 @@ def run_workflow(task, start_at=None):
                 launch_spec_map[save_as] = launch_task
                 if save_as in tracker_map:
                     tracker_map[save_as].track(process)
+                for scoped in configured_cleanup_steps:
+                    dependencies = scoped.get("requires", [])
+                    if isinstance(dependencies, str):
+                        dependencies = [dependencies]
+                    if (scoped.get("target") == save_as or save_as in dependencies
+                            or (scoped.get("type") == "launch"
+                                and (scoped.get("save_as") or scoped.get("name")) == save_as)):
+                        cleanup_steps.append(scoped)
                 log_info(f"已记录进程：{save_as}，PID={process.pid}")
 
             elif step_type == "wait":
@@ -1481,7 +1501,6 @@ def run_workflow(task, start_at=None):
         for monitored in stage_map.values():
             if monitored.profile == "maaend" and monitored.state != "SUCCEEDED":
                 monitored.wait_completion()
-        completed = True
         if status:
             uncertain = [a for a, s in status.data["stages"].items()
                          if s["state"] not in {"SUCCEEDED", "SKIPPED"}]
@@ -1491,6 +1510,7 @@ def run_workflow(task, start_at=None):
             if uncertain:
                 log_warning(f"流程结束，但以下阶段未确认成功：{', '.join(uncertain)}")
         log_info(f"流程执行完成：{task.get('name')}")
+        completed = True
     except BaseException as error:
         if status:
             status.finish("STOPPED" if isinstance(error, StopRequested) else "FAILED", error)
@@ -1498,16 +1518,18 @@ def run_workflow(task, start_at=None):
     finally:
         if not completed:
             log_warning(f"流程异常，清理已启动的程序：{task.get('name')}")
-            for name, process in process_map.items():
-                if not is_process_running(process):
-                    continue
-
-                log_warning(f"清理异常流程中的进程：{name}，PID={process.pid}")
-                close_process(process, force=False)
-                time.sleep(0.5)
-                if is_process_running(process):
-                    close_process(process, force=True)
             cleanup_errors = []
+            for name, process in process_map.items():
+                try:
+                    if not is_process_running(process):
+                        continue
+                    log_warning(f"清理异常流程中的进程：{name}，PID={process.pid}")
+                    close_process(process, force=False)
+                    time.sleep(0.5)
+                    if is_process_running(process):
+                        close_process(process, force=True)
+                except Exception as error:
+                    cleanup_errors.append(f"{name}: {error}")
             for target, tracker in tracker_map.items():
                 try:
                     tracker.close(force=True)

@@ -32,9 +32,22 @@ class IncrementalLogs:
         self.files = {}
         self.identities = {}
         for path in self.paths():
-            stat = path.stat()
-            self.files[path] = ((stat.st_dev, stat.st_ino), stat.st_size, b"")
-            self.identities[(stat.st_dev, stat.st_ino)] = (stat.st_size, b"")
+            try:
+                with path.open("rb") as stream:
+                    stat = os.fstat(stream.fileno())
+                    stream.seek(max(0, stat.st_size - 512))
+                    anchor = stream.read(stat.st_size - stream.tell())
+                    stream.seek(0)
+                    head = stream.read(min(stat.st_size, 512))
+                token = self.token(stat)
+                self.files[path] = token
+                self.identities[token] = (stat.st_size, b"", anchor, head)
+            except FileNotFoundError:
+                continue
+
+    @staticmethod
+    def token(stat):
+        return (stat.st_dev, stat.st_ino, getattr(stat, "st_birthtime_ns", None))
 
     def paths(self):
         return sorted({p for pattern in self.patterns
@@ -44,20 +57,27 @@ class IncrementalLogs:
         lines = []
         for path in self.paths():
             try:
-                stat = path.stat()
-                token = (stat.st_dev, stat.st_ino)
-                known_offset, known_carry = self.identities.get(token, (0, b""))
-                old_token, offset, carry = self.files.get(path, (token, known_offset, known_carry))
-                if token != old_token or stat.st_size < offset:
-                    offset, carry = 0, b""
                 with path.open("rb") as stream:
+                    stat = os.fstat(stream.fileno())
+                    token = self.token(stat)
+                    offset, carry, anchor, head = self.identities.get(token, (0, b"", b"", b""))
+                    stream.seek(0)
+                    unchanged_head = stream.read(len(head)) == head
+                    stream.seek(max(0, offset - len(anchor)))
+                    unchanged = stream.read(len(anchor)) == anchor
+                    if stat.st_size < offset or not unchanged or not unchanged_head:
+                        offset, carry = 0, b""
                     stream.seek(offset)
                     data = stream.read(512 * 1024)
                     offset = stream.tell()
+                    stream.seek(max(0, offset - 512))
+                    anchor = stream.read(offset - stream.tell())
+                    stream.seek(0)
+                    head = stream.read(min(offset, 512))
                 parts = (carry + data).split(b"\n")
                 carry = parts.pop()[-65536:]
-                self.files[path] = (token, offset, carry)
-                self.identities[token] = (offset, carry)
+                self.files[path] = token
+                self.identities[token] = (offset, carry, anchor, head)
                 lines.extend(p.decode("utf-8-sig", errors="replace").rstrip("\r")
                              for p in parts)
             except FileNotFoundError:
@@ -84,17 +104,25 @@ class Signals:
 
     def new_generation(self):
         self.started = self.success = False
+        self.failure = ""
         self.expected.clear()
         self.succeeded.clear()
         self.exit_group = False
+        self.completion_banner = False
 
     def consume(self, line):
         p = self.profile
         # A version CHECK is not an update; an OCR miss is not a failed task.
         if not re.search(r"更新检查|检查更新|有更新=false|check.*update", line, re.I):
+            update_failed = re.search(r"更新失败|更新未成功|update failed|failed to update", line, re.I)
+            if update_failed and self.updating:
+                self.failure = f"更新失败：{line[-180:]}"
             if re.search(r"开始更新|正在更新|正在安装更新|installing update", line, re.I):
+                if not self.updating:
+                    self.started = False
                 self.updating = True
-            if re.search(r"更新成功|更新完成|update (?:completed|successful)", line, re.I):
+            if (not update_failed and not re.search(r"更新成功=false|没有.*更新成功", line, re.I)
+                    and re.search(r"更新成功|更新完成|update (?:completed|successful)", line, re.I)):
                 if not self.updating:
                     self.started = False
                 self.updating = self.update_ready = True
@@ -185,7 +213,17 @@ class RunStatus:
             self.save()
 
     def finish(self, state, reason=""):
+        alias = self.data.get("current_stage")
+        stage = self.data["stages"].get(alias)
+        if state in {"FAILED", "STOPPED"} and stage and stage["state"] in {"STARTING", "RUNNING", "UPDATING"}:
+            stage.update(state=state, note=str(reason))
         self.data.update(state=state, reason=str(reason), finished_at=time.time())
+        self.save()
+
+    def step(self, index, total, kind, alias=None):
+        self.data["current_step"] = {"index": index, "total": total, "type": kind}
+        if alias:
+            self.data["current_stage"] = alias
         self.save()
 
 
@@ -205,6 +243,8 @@ class Stage:
         self.game_replacement_ids = set()
         self.missing_since = None
         self.update_since = None
+        self.handover_since = None
+        self.update_serial = 0
         self.recoveries = 0
         self.key_generations = set()
         self.key_action = None
@@ -242,12 +282,16 @@ class Stage:
         game_ids = {identity(p) for p in games}
         if now >= self.deadline:
             return tools, games  # Never relaunch once the hard budget has expired.
+        if self.signals.success and self.signals.updating:
+            self.finish_update()
         if self.signals.updating and not self.signals.success:
             if self.update_since is None:
                 self.update_since = now
                 self.record("UPDATING", "等待更新及进程交接，不延长总预算")
                 self.cb["info"](f"{self.alias} 检测到更新，等待进程交接")
-            if now - self.update_since >= 300:
+            if self.signals.update_ready and self.handover_since is None:
+                self.handover_since = now
+            if self.handover_since is not None and now - self.handover_since >= 300:
                 raise RuntimeError(f"{self.alias} 更新交接超过 5 分钟")
         if self.signals.game_restart and self.update_origins is None:
             self.update_origins = set(self.last_game_ids)
@@ -274,16 +318,24 @@ class Stage:
                 and (self.handover_completed or self.signals.started
                      or (not self.signals.game_restart and self.update_since is not None
                          and now - self.update_since >= 5))):
-            self.signals.updating = self.signals.update_ready = False
-            self.signals.game_restart = False
-            self.update_since = self.update_origins = None
-            self.game_replacement_since = None
-            self.handover_completed = False
+            self.finish_update()
             self.record("RUNNING", "更新交接完成")
+        elif current and game_ready and self.signals.updating and self.signals.started:
+            self.finish_update()
+            self.record("RUNNING", "本轮日志已确认更新后任务继续执行")
         self.last_game_ids = game_ids
         if self.signals.started and self.state == "STARTING":
             self.record("RUNNING")
         return tools, games
+
+    def finish_update(self):
+        self.signals.updating = self.signals.update_ready = False
+        self.signals.game_restart = False
+        self.update_since = self.update_origins = self.handover_since = None
+        self.game_replacement_since = None
+        self.game_replacement_ids = set()
+        self.handover_completed = False
+        self.update_serial += 1
 
     def accept_replacement(self):
         if self.recoveries >= 1:
@@ -307,10 +359,13 @@ class Stage:
             if self.signals.started or self.signals.success:
                 return  # F10 is a toggle: never send it to an already running job.
             if self.signals.updating and self.update_since is not None:
-                deadline = min(self.deadline, self.update_since + 300 + 120)
-            generation = frozenset(self.tool_ids)
+                deadline = self.deadline  # Downloads use the same total budget.
+            generation = self.recoveries  # Child-process churn is NOT a new task run.
             if tools and not self.signals.updating and generation not in self.key_generations:
-                if not self.cb["key"](action, tools):
+                bounded_action = dict(action)
+                bounded_action["window_timeout"] = min(float(action.get("window_timeout", 30)),
+                                                       max(0, self.deadline - time.monotonic()))
+                if not self.cb["key"](bounded_action, tools):
                     raise RuntimeError(f"{self.alias} 无法激活已验证身份的目标窗口")
                 self.key_generations.add(generation)
                 deadline = min(self.deadline, time.monotonic() + 120)
@@ -324,23 +379,32 @@ class Stage:
         seen = False
         absent_since = None
         minimum_deadline = None
+        update_serial = self.update_serial
         while True:
             tools, games = self.poll(game_path)
             # For launcher-wrapped tools (OneDragon), include tracked descendants.
             target = tools if Path(game_path).resolve() == Path(self.spec["path"]).resolve() else games
             now = time.monotonic()
+            if update_serial != self.update_serial:
+                start_deadline = min(self.deadline, now + start_timeout)
+                update_serial = self.update_serial
             if now >= self.deadline:
                 self.record("TIMED_OUT", "总运行预算耗尽")
                 if timeout_is_error:
                     self.check_deadline()
                 return False
+            if (not tools and not self.signals.updating and not self.signals.success
+                    and now - self.missing_since >= 30):
+                raise RuntimeError(f"{self.alias} 工具在任务完成前退出，未发现更新交接证据")
             if self.key_action and tools and not self.signals.started and not self.signals.updating:
                 self.send_start_key(self.key_action)
+                continue  # Refresh process snapshots after a potentially long key wait.
             if target:
                 seen = True
                 minimum_deadline = minimum_deadline or now + minimum_wait
                 absent_since = None
-            elif seen and not self.signals.updating:
+            elif (seen or self.signals.success) and not self.signals.updating:
+                minimum_deadline = minimum_deadline or self.began + minimum_wait
                 absent_since = now if absent_since is None else absent_since
                 if now - absent_since >= stable_seconds and now >= minimum_deadline:
                     state = "SUCCEEDED" if self.signals.success else "UNVERIFIED_EXIT"
@@ -349,10 +413,9 @@ class Stage:
                         self.cb["warn"](f"{self.alias} 已退出，但本轮日常结果未确认；保留原顺序继续")
                     return True
             if not seen and now >= start_deadline and not self.signals.updating:
-                # A short task can both start and finish between process polls.
                 if self.signals.success:
-                    self.record("SUCCEEDED", "本轮完成日志已确认，目标已退出")
-                    return True
+                    self.cb["wait"](1)
+                    continue  # Still observe stable exit / minimum wait for short tasks.
                 raise RuntimeError(f"{self.alias} 等待目标启动超时")
             self.cb["wait"](1)
 

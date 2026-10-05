@@ -49,6 +49,35 @@ class LogTests(unittest.TestCase):
             path.write_text("new run\n", encoding="utf-8")
             self.assertEqual(logs.poll(), ["new run"])
 
+    def test_same_file_rewritten_to_larger_size_is_read_from_beginning(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "job.log"
+            path.write_text("old line\n" * 20, encoding="utf-8")
+            logs = IncrementalLogs(Path(folder), ("*.log",))
+            path.write_text("任务已提交, taskIds: [1]\n" + "new line\n" * 40, encoding="utf-8")
+            lines = logs.poll()
+            self.assertEqual(lines[0], "任务已提交, taskIds: [1]")
+
+    def test_large_append_is_read_in_bounded_chunks_without_losing_lines(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "job.log"
+            path.touch()
+            logs = IncrementalLogs(Path(folder), ("*.log",))
+            data = "a" * 1023 + "\n"
+            path.write_bytes((data * 600).encode("utf-8"))
+            first, second = logs.poll(), logs.poll()
+            self.assertEqual(len(first), 512)
+            self.assertEqual(len(first) + len(second), 600)
+
+    def test_rewrite_detected_even_when_old_tail_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "job.log"
+            tail = "same tail\n" * 100
+            path.write_text("old header\n" + tail, encoding="utf-8")
+            logs = IncrementalLogs(Path(folder), ("*.log",))
+            path.write_text("任务已提交, taskIds: [2]\n" + tail, encoding="utf-8")
+            self.assertEqual(logs.poll()[0], "任务已提交, taskIds: [2]")
+
 
 class SignalTests(unittest.TestCase):
     def test_maaend_requires_all_submitted_root_tasks(self):
@@ -80,11 +109,25 @@ class SignalTests(unittest.TestCase):
         s.consume("更新检查完成: 有更新=false")
         self.assertFalse(s.updating)
 
+    def test_update_failure_is_not_a_success_marker(self):
+        s = Signals("maaend")
+        s.consume("正在更新")
+        s.consume("更新失败，没有更新成功")
+        self.assertTrue(s.failure)
+        self.assertFalse(s.update_ready)
+
     def test_bettergi_intentional_exit_not_false_full_success(self):
         s = Signals("bettergi")
         s.consume('配置组 "退出" 执行结束')
         s.consume("任务被取消，退出执行")
         self.assertFalse(s.failure)
+        self.assertFalse(s.success)
+
+    def test_new_generation_clears_old_completion_banner(self):
+        s = Signals("march7th")
+        s.consume("------ 完成 ------")
+        s.new_generation()
+        s.consume("游戏终止：StarRail")
         self.assertFalse(s.success)
 
     def test_march7th_requires_full_banner_and_game_termination(self):
@@ -251,6 +294,19 @@ class StageTests(unittest.TestCase):
             s.send_start_key({"keys": ["f10"]})
         self.assertEqual(self.key_calls, 1)
 
+    def test_new_helper_process_does_not_cause_second_f10(self):
+        s = self.stage("maaend", budget=1800)
+        def wait(seconds):
+            self.now += seconds
+            if self.now == 1:
+                self.tools.append({"pid": 3, "create_time": 3})
+            if self.now == 3:
+                s.signals.consume("任务已提交, taskIds: [1]")
+        s.cb["wait"] = wait
+        s.send_start_key({"keys": ["f10"]})
+        self.assertEqual(self.key_calls, 1)
+        self.assertEqual(s.recoveries, 0)
+
     def test_initial_tool_update_can_take_longer_than_key_confirmation_timeout(self):
         s = self.stage("maaend", budget=1800)
         s.signals.consume("正在更新")
@@ -272,6 +328,44 @@ class StageTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "总运行上限"):
             s.wait_exit("game.exe", 60, 10)
         self.assertEqual(self.now, 20)
+
+    def test_download_can_take_more_than_five_minutes_within_total_budget(self):
+        s = self.stage("maaend", budget=1800)
+        s.signals.consume("正在更新")
+        s.poll()
+        self.now = 700
+        s.poll()
+        self.assertTrue(s.signals.updating)
+        s.signals.consume("更新完成")
+        s.poll()
+        self.now = 705
+        s.poll()
+        self.assertFalse(s.signals.updating)
+        self.assertEqual(s.deadline, 1800)
+
+    def test_native_completion_clears_pending_update(self):
+        s = self.stage("okww")
+        s.signals.consume("正在更新")
+        s.poll()
+        s.signals.consume("TaskExecutor:Successfully Executed Task, Exiting Game and App!")
+        s.poll()
+        self.assertFalse(s.signals.updating)
+
+    def test_crashed_tool_does_not_wait_thirty_minutes_for_game_exit(self):
+        s = self.stage(budget=1800)
+        self.tools = []
+        with self.assertRaisesRegex(RuntimeError, "工具在任务完成前退出"):
+            s.wait_exit("game.exe", 600, 10)
+        self.assertEqual(self.now, 30)
+        self.assertEqual(self.relaunches, 0)
+
+    def test_short_task_already_finished_still_observes_exit_grace(self):
+        s = self.stage()
+        s.signals.success = True
+        self.games = []
+        self.assertTrue(s.wait_exit("game.exe", 60, 10))
+        self.assertEqual(self.now, 10)
+        self.assertEqual(s.state, "SUCCEEDED")
 
     def test_maa_timeout_reported_not_succeeded(self):
         s = self.stage("maa", budget=5)
@@ -341,6 +435,52 @@ class CleanupTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_status_write_failure_still_triggers_process_cleanup(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "ok-ww.exe"
+            path.touch()
+            task = {"steps": [{"type": "launch", "setup_key": "okww",
+                               "path": str(path), "save_as": "OKWW"}]}
+            with mock.patch.object(launcher, "find_processes_by_path", return_value=[]), \
+                 mock.patch.object(launcher, "launch_program", return_value=mock.Mock(pid=1)), \
+                 mock.patch.object(launcher, "is_process_running", return_value=False), \
+                 mock.patch.object(launcher, "ToolProcesses"), \
+                 mock.patch.object(launcher, "Stage") as stages, \
+                 mock.patch.object(launcher, "RunStatus") as statuses, \
+                 mock.patch.object(launcher, "check_stop_requested"), \
+                 mock.patch.object(launcher, "close_configured_processes") as cleanup:
+                stages.return_value.profile = "okww"
+                statuses.return_value.data = {"stages": {}}
+                statuses.return_value.finish.side_effect = OSError("disk full")
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    launcher.run_workflow(task)
+                cleanup.assert_called_once()
+
+    def test_failure_cleanup_does_not_include_unstarted_or_previous_stages(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            task = {"name": "test", "steps": [
+                {"type": "launch", "path": str(root / "a.exe"), "save_as": "A"},
+                {"type": "launch", "path": str(root / "b.exe"), "save_as": "B"},
+                {"type": "wait_process_exit", "path": str(root / "b-game.exe"), "requires": ["B"]},
+                {"type": "launch", "path": str(root / "c.exe"), "save_as": "C"}]}
+            with mock.patch.object(launcher, "launch_program", return_value=mock.Mock(pid=1)) as launch, \
+                 mock.patch.object(launcher, "wait_for_process_exit", side_effect=RuntimeError("test failure")), \
+                 mock.patch.object(launcher, "is_process_running", return_value=False), \
+                 mock.patch.object(launcher, "check_stop_requested"), \
+                 mock.patch.object(launcher, "close_configured_processes") as close:
+                with self.assertRaisesRegex(RuntimeError, "test failure"):
+                    launcher.run_workflow(task, start_at="B")
+            self.assertEqual(launch.call_count, 1)
+            paths = {s.get("path") for s in close.call_args.args[0]}
+            self.assertEqual(paths, {str(root / "b.exe"), str(root / "b-game.exe")})
+
+    def test_invalid_steps_rejected_before_launch(self):
+        with mock.patch.object(launcher, "launch_program") as launch:
+            with self.assertRaisesRegex(RuntimeError, "第 2 步"):
+                launcher.run_workflow({"steps": [{"type": "launch"}, None]})
+            launch.assert_not_called()
+
     def test_local_maaend_configuration_automatically_gets_completion_supervision(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "MaaEnd.exe"
@@ -384,6 +524,20 @@ class WorkflowTests(unittest.TestCase):
                 callbacks["relaunch"]()
             self.assertEqual(launch.call_args_list[0], launch.call_args_list[1])
             self.assertEqual(launch.call_args.args[0]["args"], ["-t", "1", "-e"])
+
+
+class StatusTests(unittest.TestCase):
+    def test_failure_keeps_exact_step_and_marks_current_stage_failed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "status.json"
+            status = RunStatus(path)
+            status.stage("C", "RUNNING")
+            status.step(4, 4, "wait_completion", "C")
+            status.finish("FAILED", "test failure")
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(data["current_step"]["index"], 4)
+            self.assertEqual(data["stages"]["C"]["state"], "FAILED")
+            self.assertEqual(data["reason"], "test failure")
 
 
 if __name__ == "__main__":

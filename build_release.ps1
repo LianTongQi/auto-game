@@ -150,6 +150,10 @@ if ($LASTEXITCODE -ne 0) {
 if ($LASTEXITCODE -ne 0) {
     throw 'Setup wizard mapping validation failed'
 }
+& $pythonExe -B (Join-Path $ProjectDir 'verify_public.py') --working-tree
+if ($LASTEXITCODE -ne 0) {
+    throw 'Public source audit failed'
+}
 & $pythonExe -B (Join-Path $PackageDir 'error_report.py') --check
 if ($LASTEXITCODE -ne 0) {
     throw 'Error report UI validation failed'
