@@ -1,0 +1,7 @@
+{
+  "is_demo": true,
+  "stage_name": "DEMO-2",
+  "doc": {"title": "示例：缺少核心干员；不可用于游戏"},
+  "opers": [{"name": "玛恩纳", "skill": 3, "requirements": {"elite": 2, "level": 60, "skill_level": 10}}],
+  "actions": [{"type": "Output", "doc": "缺少干员时不进入执行流程"}]
+}

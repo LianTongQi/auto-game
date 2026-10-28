@@ -1,0 +1,14 @@
+{
+  "is_demo": true,
+  "stage_name": "DEMO-1",
+  "doc": {"title": "示例：已拥有阵容与替换组；不可用于游戏"},
+  "opers": [
+    {"name": "芬", "skill": 1, "requirements": {"elite": 1, "level": 50, "skill_level": 7}},
+    {"name": "克洛丝", "skill": 1, "requirements": {"elite": 1, "level": 50, "skill_level": 7}}
+  ],
+  "groups": [{"name": "示例承伤位", "opers": [
+    {"name": "斑点", "skill": 1, "requirements": {"elite": 1, "level": 40, "skill_level": 7}},
+    {"name": "米格鲁", "skill": 1, "requirements": {"elite": 1, "level": 40, "skill_level": 7}}
+  ]}],
+  "actions": [{"type": "Output", "doc": "仅用于测试解析，不是真实通关作业"}]
+}

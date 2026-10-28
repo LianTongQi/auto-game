@@ -22,6 +22,9 @@ config/miyoushe_checkin.json
 config/secrets*
 
 # Local tooling
+features/arknights_assistant/config/local.json
+features/arknights_assistant/runtime/
+features/arknights_assistant/data/
 .agents/
 .codex/
 .tools/

@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "is_demo": true,
+  "source": "内置虚构示例，不是真实账号",
+  "operators": [
+    {"name": "芬", "elite": 1, "level": 55, "skills": {"1": 7}},
+    {"name": "克洛丝", "elite": 1, "level": 55, "skills": {"1": 7}},
+    {"name": "芙蓉", "elite": 1, "level": 40, "skills": {"1": 6}},
+    {"name": "斑点", "elite": 1, "level": 40, "skills": {"1": 7}}
+  ],
+  "materials": {"30011": 12, "30012": 3, "4001": 20000}
+}

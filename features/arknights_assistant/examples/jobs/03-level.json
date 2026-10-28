@@ -1,0 +1,7 @@
+{
+  "is_demo": true,
+  "stage_name": "DEMO-3",
+  "doc": {"title": "示例：持有但练度不足；不可用于游戏"},
+  "opers": [{"name": "芙蓉", "skill": 1, "requirements": {"elite": 1, "level": 50, "skill_level": 7}}],
+  "actions": [{"type": "Output", "doc": "不能把持有当作练度达标"}]
+}
