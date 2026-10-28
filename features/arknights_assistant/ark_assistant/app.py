@@ -7,8 +7,9 @@ from datetime import datetime
 from pathlib import Path
 
 from .maa import doctor, load_settings, resource_maps
+from .maa_logs import import_operbox
 from .model import analyze, normalize_inventory, normalize_job, read_json
-from .network import search_jobs
+from .network import get_public_json, search_jobs
 
 ROOT = Path(__file__).resolve().parent.parent
 STATUS_NAMES = {"CANDIDATE": "可试验候选（未验证通关）", "NEEDS_REVIEW": "需要核验练度/演示数据",
@@ -35,6 +36,8 @@ def describe(report):
     lines = ["明日方舟助手 · 只读分析原型", "演示数据：不是你的账号" if report["is_demo"] else "用户导入数据：尚未核对游戏实况",
              f"干员 {report['operator_count']} 名；材料 {report['material_types']} 类",
              "游戏执行关闭；不消耗理智、源石、材料，不调整编队。", ""]
+    if "scan_time" in report:
+        lines.extend(["历史扫描时间：" + report["scan_time"], report["scan_warning"], ""])
     for row in report["matches"]:
         lines.append(f"[{STATUS_NAMES[row['status']]}] {row['title']} / {row['stage']}")
         for choice in row["assignments"]:
@@ -225,6 +228,13 @@ def main(argv=None):
     p.add_argument("--stage", required=True)
     p.add_argument("--inventory", required=True)
     p.add_argument("--limit", type=int, default=10)
+    p = sub.add_parser("maa-log", help="导入已完成的本机干员扫描，并可只读检索关卡作业")
+    p.add_argument("--log", required=True)
+    p.add_argument("--stage")
+    p = sub.add_parser("probe-copilot", help="仅验证本机 MaaCore 是否接受作业，不连接/开始任务")
+    job_source = p.add_mutually_exclusive_group(required=True)
+    job_source.add_argument("--job")
+    job_source.add_argument("--job-id", type=int, help="匿名读取一份公开作业，保存到本机检查目录")
     args = parser.parse_args(argv)
     try:
         settings = load_settings(ROOT)
@@ -235,6 +245,28 @@ def main(argv=None):
         if args.command == "doctor":
             print(json.dumps(doctor(args.maa_dir or settings["maa_dir"], args.probe), ensure_ascii=False, indent=2))
             return 0
+        if args.command == "probe-copilot":
+            from .native_probe import copilot_preflight
+            folder = ROOT / "runtime" / "probes" / datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            job_path = args.job
+            if args.job_id is not None:
+                if not 1 <= args.job_id <= 10**9:
+                    raise ValueError("作业 ID 超出范围")
+                payload = get_public_json(f"/copilot/get/{args.job_id}")
+                raw = payload.get("content") if isinstance(payload, dict) else None
+                raw = json.loads(raw) if isinstance(raw, str) else raw
+                normalize_job(raw, "PRTS Plus 公开作业")
+                cache = ROOT / "runtime" / "copilots"
+                cache.mkdir(parents=True, exist_ok=True)
+                job_path = cache / f"{args.job_id}-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}.json"
+                with job_path.open("x", encoding="utf-8") as stream:
+                    json.dump(raw, stream, ensure_ascii=False, indent=2)
+            result = copilot_preflight(settings["maa_dir"], job_path, folder)
+            result["evidence_time"] = datetime.now().isoformat()
+            result_path = save_report(result)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            print("\n检查报告：" + str(result_path))
+            return 0 if result["status"] == "NATIVE_ACCEPTED" else 1
         if args.command == "demo":
             report = analyze(*demo_data())
         elif args.command == "analyze":
@@ -242,6 +274,14 @@ def main(argv=None):
             jobs = [normalize_job(read_json(path)) for path in args.jobs]
             goals = read_json(args.goals) if args.goals else {}
             report = analyze(inventory, jobs, goals, args.stage, stages)
+        elif args.command == "maa-log":
+            inventory = import_operbox(args.log, settings["maa_dir"])
+            jobs, info = search_jobs(args.stage, stage_map=stages) if args.stage else ([], None)
+            report = analyze(inventory, jobs, stage=args.stage, stage_map=stages)
+            report["scan_time"] = inventory["scan_time"]
+            report["scan_warning"] = inventory["scan_warning"]
+            if info is not None:
+                report["search"] = info
         else:
             inventory = normalize_inventory(read_json(args.inventory), names)
             jobs, info = search_jobs(args.stage, args.limit, stages)
