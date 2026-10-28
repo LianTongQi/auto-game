@@ -14,11 +14,16 @@ SECRET_PATTERNS = (
     re.compile(rb"(?i)(?:api_key|access_token|refresh_token|password|cookie)\s*[=:]\s*[\"'][^\"'\r\n]{12,}[\"']"),
 )
 PERSONAL_PATH = re.compile(rb"(?<![A-Za-z0-9_])[A-Za-z]:[\\/]")
-PRIVATE_FILES = re.compile(r"(^|/)(?:\.env(?:\..*)?|secrets(?:\..*)?|.*\.(?:pem|pfx|p12)|miyoushe_checkin\.json|setup_state\.json)$", re.I)
+PRIVATE_FILES = re.compile(r"(^|/)(?:\.env(?:\..*)?|secrets(?:\..*)?|.*\.(?:pem|pfx|p12|dpapi)|(?:miyoushe|skland)_checkin\.json|setup_state\.json)$", re.I)
+LOCAL_DOCUMENTS = {"AGENTS.md", "docs/STATUS.md", "docs/METHODS.md", "docs/DECISIONS.md"}
+PERSONAL_EMAIL = re.compile(rb"[A-Za-z0-9_.+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+CHAT_ID = re.compile(rb"(?i)\b01a[0-9a-f]{5}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
 
 
 def inspect_file(name, data):
     findings = []
+    if name in LOCAL_DOCUMENTS or name.startswith("debug/"):
+        findings.append("本机协作记录不可公开")
     if name.startswith(("logs/", "runtime/")) and name not in {"logs/.gitkeep", "runtime/.gitkeep"}:
         findings.append("运行数据不可公开")
     if name.startswith((".venv/", "venv/", ".tools/", ".codex/", ".agents/", "config/backups/", "dist/")) or PRIVATE_FILES.search(name):
@@ -29,6 +34,14 @@ def inspect_file(name, data):
         findings.append("包含绝对 Windows 路径")
     if any(pattern.search(data) for pattern in SECRET_PATTERNS):
         findings.append("疑似登录凭据或私钥")
+    if CHAT_ID.search(data):
+        findings.append("包含私人聊天标识")
+    # A pre-existing URL rejection fixture uses the literal username "user".
+    fixture_url = b"https://user" + b"@" + b"prts.maa.plus/"
+    email_data = data.replace(fixture_url, b"https://fixture.invalid/") if name.endswith("/tests/test_analysis.py") else data
+    if any(not match.lower().endswith((b"@users.noreply.github.com", b"@example.com"))
+           for match in PERSONAL_EMAIL.findall(email_data)):
+        findings.append("包含非匿名邮箱，需人工审查")
     if name == "config/tasks.json":
         try:
             tasks = json.loads(data.decode("utf-8-sig"))
@@ -55,7 +68,7 @@ def git(*args):
     return result.stdout
 
 
-def scan_tree(revision=None):
+def scan_tree(revision=None, staged=False):
     if revision:
         names = git("ls-tree", "-r", "--name-only", "-z", revision).split(b"\0")
     else:
@@ -63,22 +76,50 @@ def scan_tree(revision=None):
     errors = []
     for raw in filter(None, names):
         name = raw.decode("utf-8")
-        data = git("show", f"{revision}:{name}") if revision else (ROOT / name).read_bytes()
+        data = (git("show", f"{revision}:{name}") if revision else
+                git("show", f":{name}") if staged else (ROOT / name).read_bytes())
         errors.extend(f"{name}: {reason}" for reason in inspect_file(name, data))
+    return errors
+
+
+def scan_directory(root, build_source=False):
+    errors = []
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            name = path.relative_to(root).as_posix()
+            if build_source and name.startswith(("dist/", "runtime/build-cache/")):
+                continue
+            if path.is_symlink():
+                errors.append(f"{name}: 不允许发布符号链接")
+            else:
+                errors.extend(f"{name}: {why}" for why in inspect_file(name, path.read_bytes()))
     return errors
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--working-tree", action="store_true")
+    parser.add_argument("--staged", action="store_true", help="Audit exact index, including newly added files")
+    parser.add_argument("--directory", type=Path, help="Audit a clean exported source tree (no Git required)")
+    parser.add_argument("--build-source", action="store_true", help="Ignore only generated dist and build-cache in exported source")
     parser.add_argument("--base", default="origin/github-version")
     args = parser.parse_args()
+    if args.directory:
+        errors = scan_directory(args.directory.resolve(), args.build_source)
+        if errors:
+            print("\n".join(errors))
+            return 1
+        print("PUBLIC_EXPORT_AUDIT_OK")
+        return 0
     if git("branch", "--show-current").decode().strip() != "github-version":
         raise RuntimeError("只有 github-version 分支允许公开发布")
-    errors = scan_tree()
+    errors = scan_tree(staged=args.staged)
     revisions = [] if args.working_tree else git("rev-list", f"{args.base}..HEAD").decode().splitlines()
     for revision in revisions:
         errors.extend(f"{revision[:8]}: {error}" for error in scan_tree(revision))
+        addresses = git("show", "-s", "--format=%ae%n%ce", revision).decode().splitlines()
+        if any(not email.endswith("@users.noreply.github.com") for email in addresses):
+            errors.append(f"{revision[:8]}: 新公开提交必须使用匿名邮箱")
     if errors:
         for error in errors:
             print(error)

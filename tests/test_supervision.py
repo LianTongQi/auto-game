@@ -249,6 +249,28 @@ class StageTests(unittest.TestCase):
         s.send_start_key({"keys": ["f10"]})
         self.assertEqual(self.key_calls, 0)
 
+    def test_maaend_ui_failure_reconciles_task_started_during_activation(self):
+        s = self.stage("maaend")
+        emitted = False
+        def key(_action, _tools):
+            nonlocal emitted
+            self.key_calls += 1
+            emitted = True
+            return False
+        s.cb["key"] = key
+        with mock.patch.object(s.logs, "poll", side_effect=lambda: ["任务已提交, task_ids: [41,42]"] if emitted else []):
+            s.send_start_key({"keys": ["f10"]})
+        self.assertEqual(s.signals.expected, {41,42})
+        self.assertEqual(self.key_calls, 1)
+        self.assertEqual(s.state, "RUNNING")
+
+    def test_maaend_ui_failure_without_task_still_fails_within_budget(self):
+        s = self.stage("maaend", budget=1)
+        s.cb["key"] = lambda *_: False
+        with self.assertRaisesRegex(RuntimeError, "无法激活"):
+            s.send_start_key({"keys": ["f10"]})
+        self.assertLessEqual(self.now, 1.01)
+
     def test_expired_budget_never_relaunches_tool(self):
         s = self.stage(budget=20)
         s.poll()
@@ -372,6 +394,147 @@ class StageTests(unittest.TestCase):
         self.assertFalse(s.wait_exit(str(self.root / "tool.exe"), 60, 0,
                                      timeout_is_error=False))
         self.assertEqual(s.state, "TIMED_OUT")
+
+    def test_completed_maa_ignores_surviving_helpers_for_exit_only(self):
+        s = self.stage("maa", budget=6)
+        s.signals.consume("完成任务: 领取奖励")
+        s.signals.consume("任务已全部完成！")
+        self.games = []  # Exact MAA executable scan; helpers remain in tools.
+        helpers = list(self.tools)
+        self.assertTrue(s.wait_exit(str(self.root / "tool.exe"), 60, 2,
+                                    timeout_is_error=False))
+        self.assertEqual(s.state, "SUCCEEDED")
+        self.assertEqual(self.now, 2)
+        self.assertEqual(self.tools, helpers)  # Ownership remains for cleanup.
+
+    def test_completed_maa_still_waits_for_its_primary_process(self):
+        s = self.stage("maa", budget=10)
+        s.signals.consume("任务已全部完成！")
+        def wait(seconds):
+            self.now += seconds
+            if self.now >= 3:
+                self.games = []
+        s.cb["wait"] = wait
+        self.assertTrue(s.wait_exit(str(self.root / "tool.exe"), 60, 2))
+        self.assertEqual(self.now, 5)
+        self.assertEqual(s.state, "SUCCEEDED")
+
+    def test_maa_helpers_without_completion_cannot_count_as_success(self):
+        s = self.stage("maa", budget=4)
+        self.games = []
+        self.assertFalse(s.wait_exit(str(self.root / "tool.exe"), 60, 0,
+                                     timeout_is_error=False))
+        self.assertEqual(s.state, "TIMED_OUT")
+        self.assertFalse(s.signals.success)
+
+    def test_failed_maa_primary_exit_is_not_blocked_by_surviving_helpers(self):
+        s = self.stage("maa", budget=10)
+        helpers = list(self.tools)
+        def wait(seconds):
+            self.now += seconds
+            if self.now >= 3:
+                self.games = []
+        s.cb["wait"] = wait
+        s.signals.consume("任务已结束，以下任务出现错误: 活动")
+        self.assertTrue(s.wait_exit(str(self.root / "tool.exe"), 60, 2))
+        self.assertEqual(self.now, 5)
+        self.assertEqual(s.state, "UNVERIFIED_EXIT")
+        self.assertFalse(s.signals.success)
+        self.assertEqual(self.tools, helpers)
+        self.assertEqual(self.relaunches, 0)
+        self.assertEqual(s.deadline, 10)
+
+    def test_unverified_maa_exit_without_helpers_preserves_long_minimum_wait(self):
+        s = self.stage("maa", budget=60)
+        def wait(seconds):
+            self.now += seconds
+            if self.now >= 3:
+                self.games = []
+                self.tools = []
+        s.cb["wait"] = wait
+        self.assertTrue(s.wait_exit(str(self.root / "tool.exe"), 60, 2,
+                                    minimum_wait=40))
+        self.assertEqual(self.now, 40)
+        self.assertEqual(s.state, "UNVERIFIED_EXIT")
+        self.assertFalse(s.signals.success)
+
+    def test_unverified_maa_reappearance_resets_primary_exit_grace(self):
+        s = self.stage("maa", budget=12)
+        def wait(seconds):
+            self.now += seconds
+            self.games = [] if self.now in {1, 2} or self.now >= 4 else [{"pid": 10, "create_time": 10}]
+        s.cb["wait"] = wait
+        self.assertTrue(s.wait_exit(str(self.root / "tool.exe"), 60, 2))
+        self.assertEqual(self.now, 6)
+        self.assertEqual(s.state, "UNVERIFIED_EXIT")
+        self.assertFalse(s.signals.success)
+
+    def test_maa_update_exit_gap_without_completion_does_not_advance(self):
+        s = self.stage("maa", budget=8)
+        s.signals.consume("正在安装更新")
+        self.games = []
+        self.assertFalse(s.wait_exit(str(self.root / "tool.exe"), 60, 0,
+                                     timeout_is_error=False))
+        self.assertEqual(s.state, "TIMED_OUT")
+        self.assertEqual(self.relaunches, 0)
+        self.assertEqual(s.deadline, 8)
+
+    def test_completed_maa_preserves_minimum_wait_with_helpers(self):
+        s = self.stage("maa", budget=10)
+        s.signals.consume("任务已全部完成！")
+        self.games = []
+        self.assertTrue(s.wait_exit(str(self.root / "tool.exe"), 60, 1,
+                                    minimum_wait=3))
+        self.assertEqual(self.now, 3)
+
+    def test_completed_maa_reappearance_resets_exit_grace(self):
+        s = self.stage("maa", budget=10)
+        s.signals.consume("任务已全部完成！")
+        self.games = []
+        def wait(seconds):
+            self.now += seconds
+            self.games = [{"pid": 20, "create_time": 20}] if self.now == 1 else []
+        s.cb["wait"] = wait
+        self.assertTrue(s.wait_exit(str(self.root / "tool.exe"), 60, 2))
+        self.assertEqual(self.now, 4)
+
+    def test_other_launcher_wrappers_still_wait_for_descendants(self):
+        s = self.stage("onedragon", budget=4)
+        s.signals.success = True
+        self.games = []
+        self.assertFalse(s.wait_exit(str(self.root / "tool.exe"), 60, 0,
+                                     timeout_is_error=False))
+        self.assertEqual(s.state, "TIMED_OUT")
+
+    def test_maaend_can_run_past_thirty_minutes_but_stops_at_forty(self):
+        s = self.stage("maaend", budget=2400)
+        self.now = 1900
+        s.check_deadline()
+        self.assertEqual(s.deadline, 2400)
+        self.now = 2400
+        with self.assertRaisesRegex(RuntimeError, "总运行上限"):
+            s.check_deadline()
+        self.assertEqual(s.state, "TIMED_OUT")
+
+    def test_only_maaend_has_forty_minute_ceiling(self):
+        for profile in ("bettergi", "march7th", "okww", "onedragon", "maa", "maaend"):
+            with self.subTest(profile=profile):
+                s = self.stage(profile, budget=9999)
+                ceiling = 2400 if profile == "maaend" else 1800
+                self.assertEqual(s.deadline, ceiling)
+                self.assertEqual(self.status.data["stages"]["test"]["budget_seconds"], ceiling)
+
+    def test_maaend_update_does_not_extend_forty_minute_budget(self):
+        s = self.stage("maaend", budget=2400)
+        self.now = 1900
+        s.accept_replacement()
+        self.assertEqual(s.recoveries, 1)
+        self.assertEqual(s.deadline, 2400)
+        self.assertEqual(s.spec["args"], ["-t", "1", "-e"])
+
+    def test_shorter_explicit_maaend_budget_is_preserved(self):
+        s = self.stage("maaend", budget=120)
+        self.assertEqual(s.deadline, 120)
 
     def test_game_exit_without_marker_is_unverified(self):
         s = self.stage()

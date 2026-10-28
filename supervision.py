@@ -232,7 +232,8 @@ class Stage:
         self.alias, self.profile, self.spec = alias, profile, spec
         self.status, self.cb = status, callbacks
         self.began = time.monotonic()
-        self.deadline = self.began + min(float(budget), 1800)
+        maximum_budget = 2400 if profile == "maaend" else 1800
+        self.deadline = self.began + min(float(budget), maximum_budget)
         root = spec.get("working_dir") or str(Path(spec["path"]).parent)
         self.logs = IncrementalLogs(root, LOG_PATTERNS[profile])
         self.signals = Signals(profile)
@@ -250,7 +251,7 @@ class Stage:
         self.key_action = None
         self.handover_completed = False
         self.state = "STARTING"
-        self.status.stage(alias, self.state, profile=profile, budget_seconds=min(budget, 1800))
+        self.status.stage(alias, self.state, profile=profile, budget_seconds=min(float(budget), maximum_budget))
 
     def record(self, state, note=""):
         self.state = state
@@ -366,6 +367,17 @@ class Stage:
                 bounded_action["window_timeout"] = min(float(action.get("window_timeout", 30)),
                                                        max(0, self.deadline - time.monotonic()))
                 if not self.cb["key"](bounded_action, tools):
+                    if self.profile == "maaend":
+                        # UI activation can fail while the application has
+                        # already started. Reconcile fresh logs before cleanup.
+                        reconcile_until = min(self.deadline, time.monotonic() + 2)
+                        while True:
+                            self.poll()
+                            if self.signals.started or self.signals.success:
+                                return
+                            if time.monotonic() >= reconcile_until:
+                                break
+                            self.cb["wait"](.2)
                     raise RuntimeError(f"{self.alias} 无法激活已验证身份的目标窗口")
                 self.key_generations.add(generation)
                 deadline = min(self.deadline, time.monotonic() + 120)
@@ -383,7 +395,13 @@ class Stage:
         while True:
             tools, games = self.poll(game_path)
             # For launcher-wrapped tools (OneDragon), include tracked descendants.
-            target = tools if Path(game_path).resolve() == Path(self.spec["path"]).resolve() else games
+            tool_exit = Path(game_path).resolve() == Path(self.spec["path"]).resolve()
+            # MAA can exit after partial failure as well as success. Its helpers
+            # stay owned for cleanup, but never stand in for the primary EXE.
+            # An updater handover is different: keep waiting for that generation.
+            maa_primary_exit = (self.profile == "maa" and tool_exit
+                                and not self.signals.updating)
+            target = tools if tool_exit and not maa_primary_exit else games
             now = time.monotonic()
             if update_serial != self.update_serial:
                 start_deadline = min(self.deadline, now + start_timeout)
@@ -393,7 +411,8 @@ class Stage:
                 if timeout_is_error:
                     self.check_deadline()
                 return False
-            if (not tools and not self.signals.updating and not self.signals.success
+            if (not tools and not maa_primary_exit
+                    and not self.signals.updating and not self.signals.success
                     and now - self.missing_since >= 30):
                 raise RuntimeError(f"{self.alias} 工具在任务完成前退出，未发现更新交接证据")
             if self.key_action and tools and not self.signals.started and not self.signals.updating:

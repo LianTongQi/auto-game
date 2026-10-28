@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '1.1.0'
+    [string]$Version = '1.2.0',
+    [switch]$ExportedSource
 )
 
 $ErrorActionPreference = 'Stop'
@@ -87,13 +88,20 @@ New-Item -ItemType Directory -Force -Path $PackageDir | Out-Null
 
 $releaseFiles = @(
     'README.md',
+    'CHANGELOG.md',
+    'checkin_setup.py',
+    'configure_checkins.bat',
     'configure_launcher.bat',
     'error_report.py',
     'launcher_environment.bat',
+    'maaend_startup.py',
     'requirements.txt',
     'runtime_manifest.json',
     'scheduler_launcher.py',
+    'skland_checkin.py',
+    'skland_checkin.bat',
     'supervision.py',
+    'windows_game_ui.ps1',
     'setup_wizard.py',
     'start_launcher.bat',
     'start_launcher_hidden.bat',
@@ -106,6 +114,9 @@ foreach ($relativePath in $releaseFiles) {
 
 New-Item -ItemType Directory -Force -Path (Join-Path $PackageDir 'config'), (Join-Path $PackageDir 'logs'), (Join-Path $PackageDir 'runtime') | Out-Null
 Copy-Item -LiteralPath $configPath -Destination (Join-Path $PackageDir 'config\tasks.json')
+foreach ($template in @('miyoushe_checkin.example.json', 'skland_checkin.example.json')) {
+    Copy-Item -LiteralPath (Join-Path $ProjectDir "config\$template") -Destination (Join-Path $PackageDir "config\$template")
+}
 
 $pythonUrl = [string]$manifest.python.url
 $pythonHash = [string]$manifest.python.sha256
@@ -133,7 +144,7 @@ if (-not (Test-Path -LiteralPath $pythonExe -PathType Leaf)) {
 }
 
 Write-Host 'Installing pinned dependencies into the portable runtime...'
-& $pythonExe -B -m pip install --disable-pip-version-check --no-cache-dir --no-compile --no-deps --upgrade --requirement (Join-Path $PackageDir 'requirements.txt')
+& $pythonExe -B -m pip --isolated install --index-url https://pypi.org/simple --disable-pip-version-check --no-cache-dir --no-compile --no-deps --upgrade --requirement (Join-Path $PackageDir 'requirements.txt')
 if ($LASTEXITCODE -ne 0) {
     throw 'Portable dependency installation failed'
 }
@@ -150,7 +161,11 @@ if ($LASTEXITCODE -ne 0) {
 if ($LASTEXITCODE -ne 0) {
     throw 'Setup wizard mapping validation failed'
 }
-& $pythonExe -B (Join-Path $ProjectDir 'verify_public.py') --working-tree
+if ($ExportedSource) {
+    & $pythonExe -B (Join-Path $ProjectDir 'verify_public.py') --directory $ProjectDir --build-source
+} else {
+    & $pythonExe -B (Join-Path $ProjectDir 'verify_public.py') --working-tree
+}
 if ($LASTEXITCODE -ne 0) {
     throw 'Public source audit failed'
 }
@@ -163,7 +178,7 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Unit tests failed'
 }
 
-foreach ($entry in @('start_launcher.bat', 'start_launcher_hidden.bat', 'configure_launcher.bat')) {
+foreach ($entry in @('start_launcher.bat', 'start_launcher_hidden.bat', 'configure_launcher.bat', 'configure_checkins.bat')) {
     & cmd.exe /d /c call (Join-Path $PackageDir $entry) --check
     if ($LASTEXITCODE -ne 0) {
         throw "$entry validation failed"
@@ -172,6 +187,7 @@ foreach ($entry in @('start_launcher.bat', 'start_launcher_hidden.bat', 'configu
 
 $pythonCaches = @(Get-ChildItem -LiteralPath $runtimeDir -Recurse -Directory -Filter '__pycache__' -Force)
 foreach ($cache in ($pythonCaches | Sort-Object FullName -Descending)) {
+    Assert-ChildPath -Child $cache.FullName -Parent $runtimeDir
     Remove-Item -LiteralPath $cache.FullName -Recurse -Force
 }
 $compiledFiles = @(

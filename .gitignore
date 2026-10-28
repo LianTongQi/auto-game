@@ -9,6 +9,7 @@ venv/
 dist/
 
 # Runtime output
+debug/
 logs/*
 !logs/.gitkeep
 runtime/*
@@ -19,6 +20,8 @@ stop.request
 config/setup_state.json
 config/backups/
 config/miyoushe_checkin.json
+config/skland_checkin.json
+*.dpapi
 config/secrets*
 
 # Local tooling

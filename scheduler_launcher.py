@@ -14,6 +14,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from supervision import LOG_PATTERNS, RunStatus, Stage, identity, maaend_game_paths, onedragon_game_paths
+from maaend_startup import prepare as prepare_maaend_startup, WindowsUI, StartupBlocked
 
 try:
     import psutil
@@ -1055,6 +1056,24 @@ class ToolProcesses:
             raise RuntimeError("；".join(errors))
 
 
+def confirm_tool_exit(target, tracker, monitor=None, grace=10):
+    """Bounded exit reconciliation; never repeat Enter or kill an independent tool."""
+    deadline = time.monotonic() + grace
+    if monitor is not None:
+        deadline = min(deadline, monitor.deadline)
+    announced = False
+    while True:
+        check_stop_requested()
+        if not tracker.current():
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"{target} 回车后仍未退出，停止以防多个工具同时运行")
+        if not announced:
+            log_info(f"{target} 正在退出，最多额外确认 {grace} 秒，不重复发送回车")
+            announced = True
+        wait_interruptibly(min(.2, max(0, deadline - time.monotonic())))
+
+
 def execute_key_action(action, target_pid=None):
     """
     mode = press  ：普通按键，可以逐个按 keys
@@ -1300,11 +1319,19 @@ def run_workflow(task, start_at=None):
                         return restarted
 
                     def key_for_owned(action, tools):
+                        if action.get("_maaend_native_start"):
+                            try:
+                                ui = WindowsUI(RUNTIME_DIR, deadline=time.monotonic() + float(action.get("window_timeout", 15)))
+                                ui.maaend("DismissNews", tools)
+                                return ui.maaend("StartDaily", tools) in {"INVOKED", "ALREADY_RUNNING"}
+                            except StartupBlocked as error:
+                                log_warning(f"MaaEnd 原生开始任务入口暂不可用：{error}")
+                                return False
                         verified_action = dict(action)
                         verified_action["_process_identities"] = {p["pid"]: p["create_time"] for p in tools}
                         return execute_key_action(verified_action, target_pid=[p["pid"] for p in tools])
 
-                    budget = 1800
+                    budget = 2400 if profile == "maaend" else 1800
                     for later in steps:
                         if later.get("type") == "wait_process_exit" and save_as in later.get("requires", []):
                             budget = parse_duration(later.get("exit_timeout", "00:30:00")).total_seconds()
@@ -1355,8 +1382,8 @@ def run_workflow(task, start_at=None):
                     (a for a in required_aliases if a in exit_key_sent), None)
                 if verify_target:
                     target = verify_target
-                    if target in tracker_map and tracker_map[target].current():
-                        raise RuntimeError(f"{target} 回车后仍未退出，停止以防多个工具同时运行")
+                    if target in tracker_map:
+                        confirm_tool_exit(target, tracker_map[target], stage_map.get(target))
 
             elif step_type == "wait_process_exit":
                 executable_path = step.get("path")
@@ -1486,6 +1513,10 @@ def run_workflow(task, start_at=None):
                                                    max(0, monitor.deadline - time.monotonic()))
                 if monitor and monitor.profile == "maaend":
                     action["window_title"] = action["window_title"] or "MaaEnd"
+                    if action["keys"] == ["f10"]:
+                        prepare_maaend_startup(monitor, RUNTIME_DIR, launch_program,
+                                              step.get("official_launcher_path"))
+                        action["_maaend_native_start"] = True
                 if monitor and action["keys"] == ["f10"]:
                     monitor.send_start_key(action)
                     continue
@@ -1631,8 +1662,36 @@ def start_miyoushe_checkin_background():
         )
         log_info(f"米游社后台签到已启动，PID={process.pid}；结果由签到程序独立记录")
         return process
-    except (KeyError, TypeError, ValueError, OSError) as error:
-        log_warning(f"米游社后台签到未启动：{error}；继续游戏自动化")
+    except (KeyError, TypeError, ValueError, OSError):
+        log_warning("米游社后台签到未启动，请检查本机配置；继续游戏自动化")
+        return None
+
+
+def start_skland_checkin_background():
+    """Optional Endfield check-in; never delay or fail the game workflow."""
+    settings_file = CONFIG_DIR / "skland_checkin.json"
+    if not settings_file.is_file():
+        return None
+    try:
+        settings = load_json(settings_file, {})
+        if not isinstance(settings, dict) or settings.get("enabled") is not True:
+            return None
+        script = BASE_DIR / "skland_checkin.py"
+        if not script.is_file():
+            raise FileNotFoundError()
+        environment = os.environ.copy()
+        environment.update({"PYTHONUTF8": "1", "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1"})
+        process = subprocess.Popen(
+            [sys.executable, "-B", str(script), "auto-checkin"],
+            cwd=str(BASE_DIR), env=environment,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), close_fds=True,
+        )
+        log_info(f"森空岛终末地后台签到已启动，PID={process.pid}；结果见 runtime/skland/last_result.json")
+        return process
+    except Exception:
+        # Configuration errors must not echo any accidental credential fields.
+        log_warning("森空岛后台签到未启动，请检查本机配置；继续游戏自动化")
         return None
 
 
@@ -1685,6 +1744,7 @@ def main():
         failure_report = ""
 
         start_miyoushe_checkin_background()
+        start_skland_checkin_background()
 
         for task in tasks:
             if not isinstance(task, dict):
