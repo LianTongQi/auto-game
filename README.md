@@ -195,7 +195,7 @@ Git 仓库只保存源代码、固定依赖清单和运行环境校验信息，�
 维护者可以在 Windows PowerShell 中运行：
 
 ```powershell
-.\build_release.ps1 -Version 1.1.0
+.\build_release.ps1 -Version 1.2.1
 ```
 
 构建脚本会完成以下工作：
@@ -203,7 +203,7 @@ Git 仓库只保存源代码、固定依赖清单和运行环境校验信息，�
 1. 检查 `config/tasks.json` 中不存在本机程序路径；
 2. 从 Python 官方地址下载固定的 64 位 Python 归档并校验 SHA-256；
 3. 在临时发布目录中安装 `requirements.txt` 的固定依赖；
-4. 验证 Python、Tk 图形界面、依赖版本、自动重启逻辑、首次向导映射和三个启动入口；
+4. 验证 Python、Tk 图形界面、依赖版本、自动重启逻辑、首次向导映射和四个启动/配置入口；
 5. 生成 `dist/TimedLauncher-v*-win64.zip` 和 `dist/SHA256SUMS.txt`。
 
 下载来源和固定校验值记录在 [runtime_manifest.json](runtime_manifest.json)。发布包中的 Python 保留 Python Software Foundation 提供的许可证文件，各依赖的许可证信息随对应的 `*.dist-info` 目录一同打包。
