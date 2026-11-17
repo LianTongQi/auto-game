@@ -1,5 +1,6 @@
 import argparse
 import ctypes
+import hashlib
 import json
 import logging
 import os
@@ -13,7 +14,7 @@ from ctypes import wintypes
 from pathlib import Path
 from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
-from supervision import LOG_PATTERNS, RunStatus, Stage, identity, maaend_game_paths, onedragon_game_paths
+from supervision import LOG_PATTERNS, RunStatus, Stage, identity, maaend_game_paths, maaend_native_launch_enabled, onedragon_game_paths
 from maaend_startup import prepare as prepare_maaend_startup, WindowsUI, StartupBlocked
 
 try:
@@ -40,6 +41,7 @@ LOCK_FILE = RUNTIME_DIR / "launcher.lock"
 STOP_FILE = RUNTIME_DIR / "stop.request"
 ERROR_REPORT_FILE = RUNTIME_DIR / "last_error_report.txt"
 SETUP_VERSION = 2
+EXIT_CONFIRMATION_GRACE_SECONDS = 10
 
 LOCK_HELD = False
 
@@ -77,6 +79,17 @@ def log_warning(message):
 
 def log_error(message):
     logging.error(message)
+
+
+def log_runtime_code_identity():
+    """Identify the files actually installed, without reading user configuration."""
+    for name in ("scheduler_launcher.py", "supervision.py", "maaend_startup.py"):
+        try:
+            digest = hashlib.sha256((BASE_DIR / name).read_bytes()).hexdigest()
+            log_info(f"运行代码指纹：{name} SHA256={digest}")
+        except OSError:
+            log_warning(f"无法读取运行代码指纹：{name}")
+    log_info(f"退出确认策略：原等待后额外确认最多 {EXIT_CONFIRMATION_GRACE_SECONDS} 秒；不超过阶段期限")
 
 
 def format_failure_report(context, error, details=""):
@@ -1056,20 +1069,27 @@ class ToolProcesses:
             raise RuntimeError("；".join(errors))
 
 
-def confirm_tool_exit(target, tracker, monitor=None, grace=10):
+def confirm_tool_exit(target, tracker, monitor=None, grace=EXIT_CONFIRMATION_GRACE_SECONDS):
     """Bounded exit reconciliation; never repeat Enter or kill an independent tool."""
-    deadline = time.monotonic() + grace
+    started = time.monotonic()
+    deadline = started + grace
     if monitor is not None:
         deadline = min(deadline, monitor.deadline)
     announced = False
     while True:
         check_stop_requested()
-        if not tracker.current():
+        alive = tracker.current()
+        if not alive:
+            log_info(f"{target} 已确认实际退出（额外确认 {time.monotonic() - started:.1f} 秒）")
             return
         if time.monotonic() >= deadline:
-            raise RuntimeError(f"{target} 回车后仍未退出，停止以防多个工具同时运行")
+            pids = sorted({item["pid"] for item in alive})
+            raise RuntimeError(
+                f"{target} 回车后仍未退出，停止以防多个工具同时运行；"
+                f"额外确认 {time.monotonic() - started:.1f} 秒，仍存活 PID={pids}"
+            )
         if not announced:
-            log_info(f"{target} 正在退出，最多额外确认 {grace} 秒，不重复发送回车")
+            log_info(f"{target} 正在退出，最多额外确认 {max(0, deadline - started):.1f} 秒，不重复发送回车")
             announced = True
         wait_interruptibly(min(.2, max(0, deadline - time.monotonic())))
 
@@ -1514,8 +1534,13 @@ def run_workflow(task, start_at=None):
                 if monitor and monitor.profile == "maaend":
                     action["window_title"] = action["window_title"] or "MaaEnd"
                     if action["keys"] == ["f10"]:
-                        prepare_maaend_startup(monitor, RUNTIME_DIR, launch_program,
-                                              step.get("official_launcher_path"))
+                        spec = launch_spec_map[target]
+                        root = spec["working_dir"] or Path(spec["path"]).parent
+                        if maaend_native_launch_enabled(root):
+                            log_info("MaaEnd 已启用原生启动游戏：直接开始任务，跳过外部启动器点击")
+                        else:
+                            prepare_maaend_startup(monitor, RUNTIME_DIR, launch_program,
+                                                  step.get("official_launcher_path"))
                         action["_maaend_native_start"] = True
                 if monitor and action["keys"] == ["f10"]:
                     monitor.send_start_key(action)
@@ -1729,6 +1754,7 @@ def main():
         log_info("管理员权限：已启用")
         log_info(f"项目目录：{BASE_DIR}")
         log_info(f"配置文件：{CONFIG_FILE}")
+        log_runtime_code_identity()
 
         tasks = load_json(CONFIG_FILE, None)
         if not isinstance(tasks, list):

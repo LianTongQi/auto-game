@@ -52,6 +52,15 @@ class PublicAuditTests(unittest.TestCase):
             self.assertEqual(scan_tree(staged=True), [])
         self.assertEqual(git.call_args_list[-1], mock.call("show", ":README.md"))
 
+    def test_only_exact_reviewed_label_image_is_allowed(self):
+        name = "tests/fixtures/launcher-start-ocr-missing-first-glyph.png"
+        data = (Path(__file__).resolve().parents[1] / name).read_bytes()
+        self.assertEqual(inspect_file(name, data), [])
+        self.assertTrue(inspect_file(name, data + b"changed"))
+        self.assertTrue(inspect_file("tests/fixtures/other.png", data))
+        self.assertTrue(inspect_file("runtime/screenshot.png", data))
+        self.assertTrue(inspect_file("image.png", b"PNG\0unknown"))
+
 
 if __name__ == "__main__":
     unittest.main()

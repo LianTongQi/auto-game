@@ -1,4 +1,4 @@
-"""Deterministic official-launcher startup; no AI, credentials or fixed coordinates."""
+"""Official-launcher startup; guarded button-region clicks, no desktop coordinates."""
 import ctypes
 from ctypes import wintypes
 import json
@@ -41,8 +41,8 @@ def validate_ocr(title_lines, button_lines):
     return item["x"] + item["width"] / 2, item["y"] + item["height"] / 2
 
 
-def button_crop(image):
-    """Identify the yellow launch area, retaining a text-only OCR crop."""
+def button_bounds(image):
+    """Bound the yellow button in the fixed bottom-right launcher region."""
     from PIL import ImageChops
     w, h = image.size
     left, top = int(w * .70), int(h * .77)
@@ -55,10 +55,34 @@ def button_crop(image):
     if not box or box[2] - box[0] < w * .08 or box[3] - box[1] < h * .025:
         raise StartupBlocked("官方启动器按钮外观未通过校验，未点击")
     x, y, x2, y2 = box
+    return left + x, top + y, left + x2, top + y2
+
+
+def button_crop(image):
+    """Keep account information outside the label-only OCR input."""
+    x, y, x2, y2 = button_bounds(image)
     bw, bh = x2 - x, y2 - y
-    x, y = int(x + bw * .27), int(y + bh * .15)
-    crop = roi.crop((x, y, int(box[0] + bw * .74), int(box[1] + bh * .85)))
-    return crop.convert("L").point(lambda p: 0 if p < 110 else 255), (left + x, top + y)
+    left, top = int(x + bw * .27), int(y + bh * .15)
+    crop = image.crop((left, top, int(x + bw * .74), int(y + bh * .85)))
+    return crop.convert("L").point(lambda p: 0 if p < 110 else 255), (left, top)
+
+
+def button_ocr_input(button):
+    """Whitespace prevents Windows OCR dropping the first glyph of a tight crop.
+
+    Do not accept a partial label (e.g. '始游戏'): update/login buttons must
+    continue to fail closed. Recognition validates state, never click position.
+    """
+    from PIL import Image, ImageOps
+    scale = max(1, 300 / button.width)
+    resized = button.resize((round(button.width * scale), round(button.height * scale)),
+                            Image.Resampling.LANCZOS)
+    return ImageOps.expand(resized, border=max(30, round(resized.width * .15)), fill=255)
+
+
+def button_center(image):
+    left, top, right, bottom = button_bounds(image)
+    return (left + right) / 2, (top + bottom) / 2
 
 
 class WindowsUI:
@@ -221,16 +245,23 @@ class WindowsUI:
         w, h = image.size
         logo = image.crop((int(w * .02), int(h * .04), int(w * .27), int(h * .28)))
         logo = logo.resize((1640, max(1, round(logo.height * 1640 / logo.width))))
-        button, offset = button_crop(image)
-        button_scale = max(1, 300 / button.width)
-        button = button.resize((round(button.width * button_scale), round(button.height * button_scale)))
+        button, _ = button_crop(image)
+        point = button_center(image)
+        button = button_ocr_input(button)
         title_path, button_path = self.runtime / "game-title.png", self.runtime / "start-button.png"
         logo.save(title_path)
         button.save(button_path)
         titles = json.loads(self.native("Ocr", (title_path, "en-US")))
         buttons = json.loads(self.native("Ocr", (button_path, "zh-Hans-CN")))
-        x, y = validate_ocr(titles, buttons)
-        return x / button_scale + offset[0], y / button_scale + offset[1]
+        # Only our two small, non-account crops are included in this diagnostic.
+        (self.runtime / "recognition.json").write_text(json.dumps({
+            "strategy": "fixed-button-region-center",
+            "window_size": [w, h], "candidate_point": point,
+            "game_text": [x["text"] for x in titles],
+            "button_text": [x["text"] for x in buttons],
+        }, ensure_ascii=False), encoding="utf-8")
+        validate_ocr(titles, buttons)
+        return point
 
     def click(self, win, point):
         p = self.psutil.Process(win["pid"])
@@ -316,6 +347,6 @@ def prepare(stage, runtime_dir, launch, explicit_launcher=None, ui=None):
                         continue
                     ui.click(window, point)
                     click_sent = True
-                    stage.cb["info"]("已确认终末地页面并点击官方开始游戏按钮一次")
+                    stage.cb["info"]("已校验终末地页面及开始状态，点击右下角按钮区域中心一次")
         stage.cb["wait"](1)
     raise StartupBlocked("官方启动器启动终末地超时；不直接运行游戏 EXE，也不重复点击")

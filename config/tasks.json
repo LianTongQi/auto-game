@@ -82,7 +82,7 @@
         "name": "ok-ww",
         "path": "",
         "setup_key": "okww",
-        "args": ["-t", "1", "-e"],
+        "args": ["-t", "DailyTask", "-e"],
         "working_dir": "",
         "requires_setup_keys": ["okww", "wuthering_client"],
         "save_as": "OKWW"

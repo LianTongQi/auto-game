@@ -88,6 +88,7 @@ New-Item -ItemType Directory -Force -Path $PackageDir | Out-Null
 
 $releaseFiles = @(
     'README.md',
+    'RECOMMENDED_CONFIG.md',
     'CHANGELOG.md',
     'checkin_setup.py',
     'configure_checkins.bat',

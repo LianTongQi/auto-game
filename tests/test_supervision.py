@@ -667,13 +667,18 @@ class WorkflowTests(unittest.TestCase):
             stage.send_start_key.assert_called_once()
             stage.wait_completion.assert_called_once()
 
-    def test_original_arguments_preserved_by_supervised_restart(self):
+    def test_template_okww_task_name_preserved_by_supervised_restart(self):
+        template = Path(__file__).resolve().parents[1] / "config" / "tasks.json"
+        workflows = json.loads(template.read_text(encoding="utf-8"))
+        okww = next(step for workflow in workflows for step in workflow["steps"]
+                    if step.get("type") == "launch" and step.get("setup_key") == "okww")
+        self.assertEqual(okww["args"], ["-t", "DailyTask", "-e"])
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "ok-ww.exe"
             path.touch()
             task = {"name": "test", "steps": [
                 {"type": "launch", "setup_key": "okww", "path": str(path),
-                 "args": ["-t", "1", "-e"], "save_as": "OKWW"}]}
+                 "args": okww["args"], "save_as": "OKWW"}]}
             with mock.patch.object(launcher, "find_processes_by_path", return_value=[]), \
                  mock.patch.object(launcher, "launch_program", return_value=mock.Mock(pid=1)) as launch, \
                  mock.patch.object(launcher, "ToolProcesses") as trackers, \
@@ -687,7 +692,7 @@ class WorkflowTests(unittest.TestCase):
                 callbacks = stage_class.call_args.args[-1]
                 callbacks["relaunch"]()
             self.assertEqual(launch.call_args_list[0], launch.call_args_list[1])
-            self.assertEqual(launch.call_args.args[0]["args"], ["-t", "1", "-e"])
+            self.assertEqual(launch.call_args.args[0]["args"], ["-t", "DailyTask", "-e"])
 
 
 class StatusTests(unittest.TestCase):

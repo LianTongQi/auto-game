@@ -1,5 +1,6 @@
 """Fail-closed checks for public trees. Never prints matched secret values."""
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -19,6 +20,13 @@ LOCAL_DOCUMENTS = {"AGENTS.md", "docs/STATUS.md", "docs/METHODS.md", "docs/DECIS
 PERSONAL_EMAIL = re.compile(rb"[A-Za-z0-9_.+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 CHAT_ID = re.compile(rb"(?i)\b01a[0-9a-f]{5}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
 
+# Reviewed label-only crop: no account region or metadata containing user data.
+# Any replacement, renamed copy or additional binary requires a new review.
+REVIEWED_BINARIES = {
+    "tests/fixtures/launcher-start-ocr-missing-first-glyph.png":
+        "040dd61b5069e83cc72f7f94c1ec50d88d983b2c51e72f53b266b008dd06c2f6",
+}
+
 
 def inspect_file(name, data):
     findings = []
@@ -29,6 +37,8 @@ def inspect_file(name, data):
     if name.startswith((".venv/", "venv/", ".tools/", ".codex/", ".agents/", "config/backups/", "dist/")) or PRIVATE_FILES.search(name):
         findings.append("本机或敏感文件不可公开")
     if b"\0" in data:
+        if REVIEWED_BINARIES.get(name) == hashlib.sha256(data).hexdigest():
+            return findings
         findings.append("意外的二进制文件，需人工审查")
     if PERSONAL_PATH.search(data):
         findings.append("包含绝对 Windows 路径")
@@ -53,7 +63,7 @@ def inspect_file(name, data):
             profiles = [s.get("setup_key") for s in launches]
             if profiles != ["bettergi", "march7th", "okww", "onedragon", "maa", "maaend"]:
                 findings.append("程序顺序与公开模板不一致")
-            for key, args in (("okww", ["-t", "1", "-e"]), ("onedragon", ["-o", "-c"])):
+            for key, args in (("okww", ["-t", "DailyTask", "-e"]), ("onedragon", ["-o", "-c"])):
                 if next(s for s in launches if s.get("setup_key") == key).get("args") != args:
                     findings.append(f"{key} 原启动参数发生变化")
         except (ValueError, KeyError, TypeError, StopIteration):

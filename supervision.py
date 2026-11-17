@@ -452,20 +452,40 @@ class Stage:
             self.cb["wait"](1)
 
 
-def maaend_game_paths(root):
-    """Read enabled native launch actions; never alter the user's MaaEnd config."""
+def _maaend_active_instance(root):
     path = Path(root) / "config" / "mxu-MaaEnd.json"
     if not path.is_file():
-        return []
+        return {}
     settings = json.loads(path.read_text(encoding="utf-8-sig"))
+    return next((item for item in settings.get("instances", [])
+                 if item.get("id") == settings.get("lastActiveInstanceId")), {})
+
+
+def _maaend_has_native_launch(instance):
+    enabled = [task for task in instance.get("tasks", []) if task.get("enabled") is True]
+    launches = [task for task in enabled if task.get("taskName") == "__MXU_PRETASK__LaunchGamePC"]
+    if launches and enabled[0] is not launches[0]:
+        raise RuntimeError("MaaEnd 原生启动游戏任务必须位于已启用任务的首位")
+    return bool(launches)
+
+
+def maaend_native_launch_enabled(root):
+    """Follow the selected instance, not a version number or another preset."""
+    return _maaend_has_native_launch(_maaend_active_instance(root))
+
+
+def maaend_game_paths(root):
+    """Read native game paths for monitoring/owned cleanup, never execute them."""
+    instance = _maaend_active_instance(root)
     paths = []
-    for instance in settings.get("instances", []):
-        if instance.get("id") != settings.get("lastActiveInstanceId"):
-            continue
-        for action in instance.get("preActions", []):
-            program = action.get("program", "")
-            if action.get("enabled") and program and Path(program).is_file():
-                paths.append(program)
+    if _maaend_has_native_launch(instance):
+        program = instance.get("savedDevice", {}).get("connectedProgramPath", "")
+        if program and Path(program).name.casefold() == "endfield.exe" and Path(program).is_file():
+            paths.append(program)
+    for action in instance.get("preActions", []):
+        program = action.get("program", "")
+        if action.get("enabled") and program and Path(program).is_file() and program not in paths:
+            paths.append(program)
     return paths
 
 

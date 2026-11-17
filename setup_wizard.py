@@ -49,7 +49,7 @@ PROGRAM_FIELDS = (
         "okww",
         "3. OK-WW",
         "ok-ww.exe",
-        "保留参数：-t 1 -e",
+        "默认参数：-t DailyTask -e（按名称启动日常）",
         "https://github.com/ok-oldking/ok-wuthering-waves/releases",
     ),
     ProgramField(
